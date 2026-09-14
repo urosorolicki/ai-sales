@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/conversation/schema.json",
+  "title": "Conversation agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["escalate", "reply", "commitments_made", "confidence"],
+  "allOf": [
+    {
+      "if": { "properties": { "escalate": { "const": true } }, "required": ["escalate"] },
+      "then": {
+        "required": ["escalation_reason"],
+        "properties": {
+          "reply": { "const": "" },
+          "escalation_reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "escalate": { "const": false } }, "required": ["escalate"] },
+      "then": { "properties": { "reply": { "type": "string", "minLength": 1 } } }
+    }
+  ],
+  "properties": {
+    "escalate": { "type": "boolean" },
+    "escalation_reason": { "type": "string" },
+    "reply": { "type": "string", "maxLength": 1500 },
+    "offer_discussed": {
+      "type": "string",
+      "enum": ["infrastructure_audit", "devops_improvement_sprint", "fractional_devops_sre", ""]
+    },
+    "price_quoted": { "type": "string" },
+    "commitments_made": { "type": "array", "items": { "type": "string" } },
+    "next_step": {
+      "type": "string",
+      "enum": ["agent_reply", "human_reply", "await_prospect", "close", ""]
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

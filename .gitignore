@@ -1,0 +1,62 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+credentials/
+credentials.json
+secrets/
+*.secret
+
+# Runtime configuration derived from templates
+Caddyfile
+!Caddyfile.example
+
+# Database dumps and backups
+*.sql.gz
+*.dump
+*.bak
+backups/
+postgres/dumps/
+
+# Logs
+*.log
+logs/
+
+# n8n local data
+.n8n/
+n8n/data/
+n8n/.n8n/
+n8n/local/
+
+# Ollama local models
+ollama/models/
+
+# Node / tooling
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.swp
+*~
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

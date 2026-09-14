@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/research/schema.json",
+  "title": "Research agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_summary", "facts", "technology", "hiring_signals", "pain_signals",
+    "reasonable_inferences", "unknown", "decision_maker_reason",
+    "recommended_service", "why_now", "confidence", "sources"
+  ],
+  "properties": {
+    "company_summary": { "type": "string", "maxLength": 500 },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fact", "source"],
+        "properties": {
+          "fact": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "format": "uri" },
+          "observed_at": { "type": "string" }
+        }
+      }
+    },
+    "technology": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "evidence", "source", "confidence"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "category": { "type": "string" },
+          "evidence": { "type": "string" },
+          "source": { "type": "string", "format": "uri" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "hiring_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "source"],
+        "properties": {
+          "role": { "type": "string" },
+          "seniority": { "type": "string" },
+          "posted_at": { "type": "string" },
+          "requirements": { "type": "array", "items": { "type": "string" } },
+          "source": { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "pain_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signal_type", "signal", "source", "confidence"],
+        "properties": {
+          "signal_type": {
+            "type": "string",
+            "enum": [
+              "hiring_devops", "hiring_engineering_growth", "kubernetes_adoption",
+              "cloud_migration", "infrastructure_scaling", "reliability_problem",
+              "cloud_cost_problem", "leadership_change", "funding",
+              "technology_announcement", "other"
+            ]
+          },
+          "signal": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "format": "uri" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "reasonable_inferences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["inference", "based_on"],
+        "properties": {
+          "inference": { "type": "string" },
+          "based_on": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "unknown": { "type": "array", "items": { "type": "string" } },
+    "decision_maker_reason": { "type": "string" },
+    "recommended_service": {
+      "type": "string",
+      "enum": ["infrastructure_audit", "devops_improvement_sprint", "fractional_devops_sre", "none"]
+    },
+    "why_now": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "sources": { "type": "array", "items": { "type": "string", "format": "uri" } }
+  }
+}

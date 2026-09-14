@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/scoring/schema.json",
+  "title": "Scoring agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_fit", "technology_fit", "hiring_signal", "pain_evidence",
+    "decision_maker", "commercial_potential",
+    "fit_score", "research_score", "decision_maker_score",
+    "total_score", "band", "recommended_offer", "reason"
+  ],
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["points", "reason"],
+      "properties": {
+        "points": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "component10": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["points", "reason"],
+      "properties": {
+        "points": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "properties": {
+    "company_fit": { "$ref": "#/$defs/component" },
+    "technology_fit": { "$ref": "#/$defs/component" },
+    "hiring_signal": { "$ref": "#/$defs/component" },
+    "pain_evidence": { "$ref": "#/$defs/component" },
+    "decision_maker": { "$ref": "#/$defs/component10" },
+    "commercial_potential": { "$ref": "#/$defs/component10" },
+    "fit_score": { "type": "integer", "minimum": 0, "maximum": 50 },
+    "research_score": { "type": "integer", "minimum": 0, "maximum": 40 },
+    "decision_maker_score": { "type": "integer", "minimum": 0, "maximum": 10 },
+    "total_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "band": {
+      "type": "string",
+      "enum": ["IGNORE", "NURTURE", "OUTREACH", "HIGH_PRIORITY", "HOT"]
+    },
+    "recommended_offer": {
+      "type": "string",
+      "enum": ["infrastructure_audit", "devops_improvement_sprint", "fractional_devops_sre", "none"]
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "overrides_applied": { "type": "array", "items": { "type": "string" } }
+  }
+}

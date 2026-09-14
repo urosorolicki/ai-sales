@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/outreach/schema.json",
+  "title": "Outreach agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["send"],
+  "allOf": [
+    {
+      "if": { "properties": { "send": { "const": true } }, "required": ["send"] },
+      "then": { "required": ["subject", "body", "word_count", "offer", "hook_fact", "hook_source", "cta"] }
+    },
+    {
+      "if": { "properties": { "send": { "const": false } }, "required": ["send"] },
+      "then": { "required": ["reason_if_not_sending"] }
+    }
+  ],
+  "properties": {
+    "send": { "type": "boolean" },
+    "subject": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "body": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "word_count": { "type": "integer", "minimum": 1, "maximum": 120 },
+    "offer": {
+      "type": "string",
+      "enum": ["infrastructure_audit", "devops_improvement_sprint", "fractional_devops_sre"]
+    },
+    "hook_fact": { "type": "string", "minLength": 1 },
+    "hook_source": { "type": "string", "format": "uri" },
+    "cta": { "type": "string", "minLength": 1 },
+    "reason_if_not_sending": { "type": "string" }
+  }
+}

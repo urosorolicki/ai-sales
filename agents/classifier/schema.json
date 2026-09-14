@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/classifier/schema.json",
+  "title": "Classifier agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "confidence", "reason", "requested_stop", "human_required"],
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": ["POSITIVE", "QUESTION", "PRICE", "NOT_NOW", "NEGATIVE", "REFERRAL", "UNSUBSCRIBE", "OUT_OF_SCOPE"]
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "requested_stop": { "type": "boolean" },
+    "mentioned_price": { "type": "boolean" },
+    "mentioned_timeline": { "type": "string" },
+    "referred_to": { "type": "string" },
+    "suggested_next_action": { "type": "string" },
+    "human_required": { "type": "boolean" }
+  }
+}

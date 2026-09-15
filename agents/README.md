@@ -14,6 +14,11 @@ retries and state - which n8n already solves - not agent autonomy.
 | scoring | `prompts/scoring.md` | WF-04 | external LLM | `companies.*_score`, `leads` |
 | outreach | `prompts/outreach.md` | WF-05 | external LLM | `outreach` (draft) |
 | classifier | `prompts/classifier.md` | WF-08 | Ollama, escalating to external LLM | `messages.classification`, `suppression_list` |
+| triage | inline in WF-02 | WF-02 | Ollama | `agent_runs` only |
+
+`triage` is not a directory of its own: it is a one-question filter in front of
+the research agent, recorded under `agent_name = 'classifier'` because that is
+the role it plays. See `docs/company-research.md`.
 | conversation | `prompts/conversation.md` | WF-09 | external LLM | `messages`, `conversations` |
 
 ## Contract

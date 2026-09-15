@@ -14,12 +14,61 @@ Every 30 Minutes
   -> Claim Companies                               (FOR UPDATE SKIP LOCKED)
   -> Candidate URLs -> Fetch robots.txt -> Allowed URLs
   -> Split URLs -> Fetch Page -> Group Material    (fan out per page, fan back in per company)
-  -> Open Agent Run                                (status 'running')
-  -> Build Research Request -> Research Agent      (Anthropic Messages API)
-  -> Validate Research -> Research Valid?
-        +-- true  -> Store Research -> Close Run Success -> Researched
-        +-- false -> Close Run Error
+  -> Open Triage Run -> Triage -> Validate Triage -> Close Triage Run   (local, free)
+  -> Worth Researching?
+        +-- false -> Park Company -> Skipped                            (no paid call)
+        +-- true  -> Open Agent Run
+                     -> Build Research Request -> Research Agent        (Anthropic, paid)
+                     -> Validate Research -> Research Valid?
+                          +-- true  -> Store Research -> Close Run Success -> Researched
+                          +-- false -> Close Run Error
 ```
+
+## Two models, on purpose
+
+The expensive model is only called for companies that survive a free local
+filter.
+
+**Triage** runs on Ollama (`llama3.1:8b`) and answers exactly one question: is
+there anything in this material worth paying a stronger model to look at? It
+does not analyse the company, list its stack or judge it as a customer. A small
+yes/no is what an 8B model is reliably good at, and it is the role
+`agents/README.md` already assigns to the local model - which is why the triage
+run is recorded with `agent_name = 'classifier'`.
+
+**The filter is deliberately biased towards yes.** A false negative discards a
+company permanently; a false positive costs a fraction of a cent. The prompt says
+so in as many words, and the validator **fails open**: if Ollama is down, slow,
+or returns something unusable, the company goes to the paid model anyway. A
+broken filter must cost money, never silently lose leads.
+
+Two things are checked before the model's opinion counts:
+
+- `pages_fetched == 0` skips regardless. Nothing was fetched, so there is nothing
+  for any model to research. That is mechanical, not a judgement.
+- The `### SOURCE: <url>` headers are stripped from the triage input. Those URLs
+  contain the candidate paths - `/careers`, `/blog`, `/engineering` - which are
+  exactly the keywords triage looks for. Left in, the filter answers "yes, there
+  is an engineering section" for *every* site, because the URL said so. This was
+  a real bug, caught by running the workflow against a site with no engineering
+  content and getting `true` back.
+
+A skipped company is parked at `status = 'ignored'` with the reason on its
+`classifier` run in `agent_runs`. Setting it back to `new` re-queues it.
+
+### Measured on this machine
+
+| | Time | Cost |
+|---|---|---|
+| Triage, clearly relevant material | 26s | free |
+| Triage, marketing site | 7s | free |
+| Triage, ambiguous | 5s | free |
+| Full research | seconds | ~2-3c |
+
+Triage is slow because **Ollama runs on CPU**: Docker Desktop on macOS has no
+Metal passthrough, so the M4 Pro GPU is unused. Running Ollama natively on the
+host and pointing `OLLAMA_BASE_URL` at `http://host.docker.internal:11434` would
+speed this up by roughly an order of magnitude, and costs nothing.
 
 ## The prompt is read from disk, not embedded
 
@@ -127,6 +176,12 @@ WF-99 is set as the error workflow, and `$execution.id` is recorded in
 |---|---|---|
 | Postgres account | `postgres` | exists |
 | **Anthropic** | `anthropicApi` | **must be created** |
+
+Triage needs no credential: Ollama has no authentication, and its base URL is
+configuration rather than a secret. Until the Anthropic credential exists, every
+company that passes triage fails with `Credentials not found`, is recorded as an
+error run and returns to the queue - so nothing is lost, and the free half of the
+pipeline keeps working.
 
 Create it under Credentials > New > Anthropic, paste the API key, then open the
 **Research Agent** node and select it. `docs/security.md` requires credentials to

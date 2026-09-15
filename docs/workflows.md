@@ -52,9 +52,11 @@ Finds candidate companies. Does not research them.
 
 ## WF-02 Company Research
 
-**Built** - see `docs/company-research.md`. Playwright and cross-run per-domain
-rate limiting are not implemented; the Anthropic credential must be created
-before it can run.
+**Built** - see `docs/company-research.md`. Two models: a free local triage pass
+on Ollama filters out companies with no engineering evidence, and only the
+survivors reach the paid research model. Playwright and cross-run per-domain rate
+limiting are not implemented; the Anthropic credential must be created before the
+paid half can run.
 
 | | |
 |---|---|

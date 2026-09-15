@@ -219,13 +219,13 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Bracket the run: 'running' before the model call, terminal after.\n-- company_id is set here, which is what lets WF-101 and v_agent_health attribute\n-- a failure to a company later.\nINSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\nVALUES (\n    'research',\n    ($1::jsonb ->> 'company_id')::uuid,\n    $1::jsonb -> 'input',\n    'running',\n    $1::jsonb ->> 'model',\n    now()\n)\nRETURNING id, company_id, status, started_at;",
+        "query": "-- Triage is an LLM call, so it leaves its own agent_runs row. agent_name is\n-- 'classifier' because that is what this is: a cheap local filter, which is the\n-- role agents/README.md assigns to the local model.\nINSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\nVALUES (\n    'classifier',\n    ($1::jsonb ->> 'company_id')::uuid,\n    $1::jsonb -> 'input',\n    'running',\n    $1::jsonb ->> 'model',\n    now()\n)\nRETURNING id, company_id, status;",
         "options": {
-          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, model: $env.LLM_MODEL || 'claude-sonnet-5', input: { execution_id: String($execution.id), workflow_id: $workflow.id, company: $json.name, domain: $json.domain, sources: $json.sources, fetch_failures: $json.fetch_failures, robots_blocked: $json.robots_blocked, material_chars: $json.material_chars, material_truncated: $json.material_truncated } } ) }}"
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, model: $env.OLLAMA_MODEL || 'llama3.1:8b', input: { execution_id: String($execution.id), workflow_id: $workflow.id, stage: 'triage', company: $json.name, domain: $json.domain, pages_fetched: $json.pages_fetched, material_chars: $json.material_chars } } ) }}"
         }
       },
       "id": "p2-07",
-      "name": "Open Agent Run",
+      "name": "Open Triage Run",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
@@ -237,20 +237,222 @@
           "id": "vUxYVHnmuty8Jcgk",
           "name": "Postgres account"
         }
-      },
-      "notes": "execution_id is what lets WF-99 close this row if the workflow dies."
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Assemble the Anthropic request. The system prompt is read from\n// prompts/research.md at runtime (./prompts is mounted read-only at /prompts),\n// so that file is the single source of truth and cannot drift from this node.\n\nconst MODEL = $env.LLM_MODEL || 'claude-sonnet-5';\nconst MAX_TOKENS = Number($env.LLM_MAX_TOKENS) || 4096;\n\n// prompts/research.md keeps the system prompt in the first fenced block under\n// \"## System prompt\". Extract exactly that; a heading change must fail loudly\n// rather than quietly send the whole markdown file as a prompt.\nfunction extractSystemPrompt(markdown) {\n  const section = markdown.split(/^##\\s+System prompt\\s*$/m)[1];\n  if (!section) throw new Error('prompts/research.md: no \"## System prompt\" heading found');\n  const fence = section.match(/```[a-z]*\\n([\\s\\S]*?)\\n```/);\n  if (!fence) throw new Error('prompts/research.md: no fenced block under \"## System prompt\"');\n  const text = fence[1].trim();\n  if (text.length < 200) throw new Error('prompts/research.md: system prompt looks truncated');\n  return text;\n}\n\nconst systemPrompt = extractSystemPrompt($('Prompt To Text').first().json.data);\nconst material = $('Group Material').all();\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const run = $input.all()[i].json;\n  const m = material[i].json;\n\n  const userContent = [\n    'Company: ' + m.name,\n    'Domain: ' + m.domain,\n    'Industry: ' + (m.industry || 'unknown'),\n    '',\n    m.sources.length\n      ? 'The following material was fetched from the company\\'s own site. Cite these URLs.'\n      : 'No material could be fetched from this company\\'s site.',\n    '',\n    m.material || '(nothing fetched)',\n    '',\n    '---',\n    'Pages that could not be fetched: ' + (m.fetch_failures.length ? m.fetch_failures.join(', ') : 'none'),\n    'Pages disallowed by robots.txt: ' + (m.robots_blocked.length ? m.robots_blocked.join(', ') : 'none'),\n    m.material_truncated ? 'The material above was truncated at a character limit.' : '',\n    '',\n    'Return the JSON object described in the system prompt, and nothing else.',\n  ].join('\\n');\n\n  out.push({\n    json: {\n      agent_run_id: run.id,\n      company_id: m.company_id,\n      name: m.name,\n      domain: m.domain,\n      prior_failures: m.prior_failures,\n      sources: m.sources,\n      model: MODEL,\n      llm_request: {\n        model: MODEL,\n        max_tokens: MAX_TOKENS,\n        // No \"temperature\": claude-sonnet-5 rejects sampling parameters with a\n        // 400. LLM_TEMPERATURE in .env does not apply to this model.\n        // No assistant prefill either - also a 400 on this model family.\n        system: [\n          {\n            type: 'text',\n            text: systemPrompt,\n            // The system prompt is identical for every company in the batch and\n            // between runs, so it is worth caching.\n            cache_control: { type: 'ephemeral' },\n          },\n        ],\n        messages: [{ role: 'user', content: userContent }],\n      },\n    },\n  });\n}\n\nreturn out;\n"
+        "jsCode": "// Build the Ollama triage request. Deliberately cheap: a short prompt, a small\n// slice of the material and a tiny output budget. Triage runs for every company,\n// including the ones that go on to the expensive model, so its cost is paid\n// every time and must stay low.\n\nconst MAX_TRIAGE_CHARS = 4000;\nconst MODEL = $env.OLLAMA_MODEL || 'llama3.1:8b';\n\n// The source headers carry the candidate paths - /careers, /blog, /engineering -\n// which are exactly the keywords triage looks for. Left in, the filter answers\n// \"yes, there is an engineering section\" for any site at all, because the URL\n// said so. Triage judges the text; only the research call needs the URLs.\nfunction neutraliseSources(text) {\n  return String(text).replace(/^### SOURCE: \\S+[ \\t]*$/gm, '### PAGE');\n}\n\nconst SYSTEM = \"You are a triage filter for a DevOps and SRE consultancy's lead pipeline.\\n\\nYou are given text fetched from one company's own website. Decide exactly one\\nthing: is there anything here worth paying a stronger model to analyse?\\n\\nAnswer true if the material mentions ANY of:\\n- engineering or technical hiring of any kind\\n- cloud, infrastructure, Kubernetes, Docker, containers, CI/CD, deployment,\\n  platform, SRE, DevOps, Terraform\\n- an engineering blog, a status page, public repositories\\n- scaling, reliability, outages, incidents, migrations, performance\\n\\nAnswer false ONLY if the material is plainly a marketing or brochure site with no\\nengineering content whatsoever, or there is essentially no text to judge.\\n\\nWHEN IN DOUBT, ANSWER TRUE. Answering false permanently discards a company that\\nis never looked at again. Answering true costs a fraction of a cent. Caution in\\nthis direction is correct, not lazy.\\n\\nDo not analyse the company. Do not list its technology stack. Do not judge\\nwhether it is a good customer. Only decide whether there is evidence here.\\n\\nReturn strict JSON only.\";\n\n// Ollama 0.5+ takes a JSON Schema in `format` and constrains generation to it.\n// That fixes the shape; it does not make the judgement good, which is why this\n// model is only asked a yes/no question.\nconst SCHEMA = {\n  \"type\": \"object\",\n  \"properties\": {\n    \"worth_researching\": {\n      \"type\": \"boolean\"\n    },\n    \"evidence_seen\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"reason\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"worth_researching\",\n    \"evidence_seen\",\n    \"reason\"\n  ]\n};\n\nconst material = $('Group Material').all();\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const run = $input.all()[i].json;\n  const m = material[i].json;\n\n  out.push({\n    json: {\n      triage_run_id: run.id,\n      company_id: m.company_id,\n      name: m.name,\n      domain: m.domain,\n      pages_fetched: m.pages_fetched,\n      material_chars: m.material_chars,\n      triage_request: {\n        model: MODEL,\n        stream: false,\n        format: SCHEMA,\n        options: { temperature: 0, num_predict: 256, num_ctx: 8192 },\n        messages: [\n          { role: 'system', content: SYSTEM },\n          {\n            role: 'user',\n            content:\n              'Company: ' + m.name + '\\n' +\n              'Domain: ' + m.domain + '\\n\\n' +\n              (m.material\n                ? neutraliseSources(m.material).slice(0, MAX_TRIAGE_CHARS)\n                : '(nothing could be fetched)'),\n          },\n        ],\n      },\n    },\n  });\n}\n\nreturn out;\n"
       },
       "id": "c2-08",
-      "name": "Build Research Request",
+      "name": "Build Triage Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         1340,
         300
+      ],
+      "notes": "Short prompt, 4000 characters of material, 256 output tokens. Triage runs for every company, so its cost is paid every time."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://ollama:11434') + '/api/chat' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.triage_request) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n2-triage",
+      "name": "Triage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Local Ollama. No credential: Ollama has no authentication and the base URL is configuration, not a secret."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read the triage verdict. This node fails open on purpose.\n//\n// If Ollama is down, slow, or returns something unusable, the company goes to\n// the expensive model anyway. The filter exists to save money, and a broken\n// filter must cost money rather than silently discard leads.\n\nconst requests = $('Build Triage Request').all();\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const req = requests[i].json;\n  const res = $input.all()[i].json ?? {};\n\n  let worth = true;\n  let reason = '';\n  let evidence = [];\n  let failedOpen = false;\n\n  // Nothing was fetched, so there is nothing for any model to research. This is\n  // mechanical, not a judgement, and it is checked before the model's opinion.\n  if (req.pages_fetched === 0) {\n    worth = false;\n    reason = 'No page could be fetched from this domain';\n  } else if (res.error !== undefined) {\n    failedOpen = true;\n    reason = 'Triage unavailable (' +\n      (typeof res.error === 'string' ? res.error : (res.error && res.error.message) || 'unknown') +\n      '); passing through to the research model';\n  } else {\n    const raw = res.message && typeof res.message.content === 'string' ? res.message.content : '';\n    let parsed = null;\n    try {\n      parsed = JSON.parse(raw);\n    } catch (e) {\n      failedOpen = true;\n      reason = 'Triage returned unparseable JSON; passing through to the research model';\n    }\n    if (parsed && typeof parsed.worth_researching === 'boolean') {\n      worth = parsed.worth_researching;\n      reason = typeof parsed.reason === 'string' ? parsed.reason : '';\n      evidence = Array.isArray(parsed.evidence_seen) ? parsed.evidence_seen.filter((e) => typeof e === 'string') : [];\n    } else if (parsed) {\n      failedOpen = true;\n      reason = 'Triage gave no boolean verdict; passing through to the research model';\n    }\n  }\n\n  out.push({\n    json: {\n      ...req,\n      worth_researching: worth,\n      triage_reason: reason,\n      triage_evidence: evidence,\n      triage_failed_open: failedOpen,\n      triage_model: req.triage_request.model,\n    },\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "c2-09",
+      "name": "Validate Triage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1740,
+        300
+      ],
+      "notes": "Fails open. A broken filter must cost money, never silently discard leads."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close the triage run and carry the verdict forward as a column, so the IF\n-- after this node reads its own input instead of reaching back across the\n-- branch for it.\nWITH closed AS (\n    UPDATE agent_runs\n    SET status      = 'success',\n        output      = $1::jsonb -> 'output',\n        error       = NULL,\n        finished_at = now()\n    WHERE id = ($1::jsonb ->> 'triage_run_id')::uuid\n    RETURNING id\n)\nSELECT (SELECT id FROM closed)                      AS triage_run_id,\n       ($1::jsonb ->> 'worth_researching')::boolean AS worth_researching,\n       $1::jsonb ->> 'company_id'                   AS company_id,\n       $1::jsonb ->> 'name'                         AS name,\n       $1::jsonb ->> 'domain'                       AS domain,\n       $1::jsonb ->> 'triage_reason'                AS triage_reason;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ triage_run_id: $json.triage_run_id, company_id: $json.company_id, name: $json.name, domain: $json.domain, worth_researching: $json.worth_researching, triage_reason: $json.triage_reason, output: { worth_researching: $json.worth_researching, reason: $json.triage_reason, evidence_seen: $json.triage_evidence, failed_open: $json.triage_failed_open, model: $json.triage_model } } ) }}"
+        }
+      },
+      "id": "p2-10",
+      "name": "Close Triage Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1940,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "t2-1",
+              "leftValue": "={{ $json.worth_researching }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n2-ifworth",
+      "name": "Worth Researching?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Triage found nothing worth paying the research model for. The company is\n-- parked rather than deleted, and the reason is on its classifier run in\n-- agent_runs. Setting status back to 'new' re-queues it.\nUPDATE companies\nSET status = 'ignored'\nWHERE id = ($1::jsonb ->> 'company_id')::uuid\n  AND status = 'researching'\nRETURNING id, name, domain::text AS domain, status;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id } ) }}"
+        }
+      },
+      "id": "p2-11",
+      "name": "Park Company",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2340,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Skipped by triage. Re-queue by setting status back to 'new'."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "k1",
+              "name": "company",
+              "value": "={{ $json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "k2",
+              "name": "domain",
+              "value": "={{ $json.domain }}",
+              "type": "string"
+            },
+            {
+              "id": "k3",
+              "name": "result",
+              "value": "skipped_by_triage",
+              "type": "string"
+            },
+            {
+              "id": "k4",
+              "name": "company_status",
+              "value": "={{ $json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "k5",
+              "name": "reason",
+              "value": "={{ $('Close Triage Run').item.json.triage_reason }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n2-skipped",
+      "name": "Skipped",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2540,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Bracket the run: 'running' before the model call, terminal after.\n-- company_id is set here, which is what lets WF-101 and v_agent_health attribute\n-- a failure to a company later.\nINSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\nVALUES (\n    'research',\n    ($1::jsonb ->> 'company_id')::uuid,\n    $1::jsonb -> 'input',\n    'running',\n    $1::jsonb ->> 'model',\n    now()\n)\nRETURNING id, company_id, status, started_at;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, model: $env.LLM_MODEL || 'claude-sonnet-5', input: { execution_id: String($execution.id), workflow_id: $workflow.id, stage: 'research', company: $json.name, domain: $json.domain, sources: $('Group Material').item.json.sources, fetch_failures: $('Group Material').item.json.fetch_failures, robots_blocked: $('Group Material').item.json.robots_blocked, material_chars: $('Group Material').item.json.material_chars, material_truncated: $('Group Material').item.json.material_truncated } } ) }}"
+        }
+      },
+      "id": "p2-12",
+      "name": "Open Agent Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2340,
+        140
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "execution_id is what lets WF-99 close this row if the workflow dies."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the Anthropic request. Runs once per item: this node sits after the\n// triage branch, where item indexes no longer line up with the nodes before it,\n// so the company is reached through n8n's paired-item link rather than by index.\n//\n// The system prompt is read from prompts/research.md at runtime (./prompts is\n// mounted read-only at /prompts), so that file is the single source of truth.\n\nconst MODEL = $env.LLM_MODEL || 'claude-sonnet-5';\nconst MAX_TOKENS = Number($env.LLM_MAX_TOKENS) || 4096;\n\n// prompts/research.md keeps the system prompt in the first fenced block under\n// \"## System prompt\". Extract exactly that; a heading change must fail loudly\n// rather than quietly send the whole markdown file as a prompt.\nfunction extractSystemPrompt(markdown) {\n  const section = markdown.split(/^##\\s+System prompt\\s*$/m)[1];\n  if (!section) throw new Error('prompts/research.md: no \"## System prompt\" heading found');\n  const fence = section.match(/```[a-z]*\\n([\\s\\S]*?)\\n```/);\n  if (!fence) throw new Error('prompts/research.md: no fenced block under \"## System prompt\"');\n  const text = fence[1].trim();\n  if (text.length < 200) throw new Error('prompts/research.md: system prompt looks truncated');\n  return text;\n}\n\nconst systemPrompt = extractSystemPrompt($('Prompt To Text').first().json.data);\nconst run = $input.item.json;\nconst m = $('Group Material').item.json;\n\nconst userContent = [\n  'Company: ' + m.name,\n  'Domain: ' + m.domain,\n  'Industry: ' + (m.industry || 'unknown'),\n  '',\n  m.sources.length\n    ? 'The following material was fetched from the company\\'s own site. Cite these URLs.'\n    : 'No material could be fetched from this company\\'s site.',\n  '',\n  m.material || '(nothing fetched)',\n  '',\n  '---',\n  'Pages that could not be fetched: ' + (m.fetch_failures.length ? m.fetch_failures.join(', ') : 'none'),\n  'Pages disallowed by robots.txt: ' + (m.robots_blocked.length ? m.robots_blocked.join(', ') : 'none'),\n  m.material_truncated ? 'The material above was truncated at a character limit.' : '',\n  '',\n  'Return the JSON object described in the system prompt, and nothing else.',\n].join('\\n');\n\nreturn {\n  json: {\n    agent_run_id: run.id,\n    company_id: m.company_id,\n    name: m.name,\n    domain: m.domain,\n    prior_failures: m.prior_failures,\n    sources: m.sources,\n    model: MODEL,\n    llm_request: {\n      model: MODEL,\n      max_tokens: MAX_TOKENS,\n      // No \"temperature\": claude-sonnet-5 rejects sampling parameters with a\n      // 400. LLM_TEMPERATURE in .env does not apply to this model.\n      // No assistant prefill either - also a 400 on this model family.\n      system: [\n        {\n          type: 'text',\n          text: systemPrompt,\n          // Identical for every company and between runs, so worth caching.\n          cache_control: { type: 'ephemeral' },\n        },\n      ],\n      messages: [{ role: 'user', content: userContent }],\n    },\n  },\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c2-13",
+      "name": "Build Research Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        140
       ],
       "notes": "No temperature: claude-sonnet-5 rejects sampling parameters with a 400."
     },
@@ -281,8 +483,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
-        300
+        2740,
+        140
       ],
       "retryOnFail": true,
       "maxTries": 2,
@@ -292,15 +494,16 @@
     },
     {
       "parameters": {
-        "jsCode": "// Validate the research response against agents/research/schema.json.\n// Never throws, never repairs. A response that does not match is an error.\n\nconst SERVICES = ['infrastructure_audit', 'devops_improvement_sprint', 'fractional_devops_sre', 'none'];\nconst SIGNAL_TYPES = [\n  'hiring_devops', 'hiring_engineering_growth', 'kubernetes_adoption',\n  'cloud_migration', 'infrastructure_scaling', 'reliability_problem',\n  'cloud_cost_problem', 'leadership_change', 'funding',\n  'technology_announcement', 'other',\n];\nconst REQUIRED = {\n  company_summary: 'string', facts: 'array', technology: 'array',\n  hiring_signals: 'array', pain_signals: 'array', reasonable_inferences: 'array',\n  unknown: 'array', decision_maker_reason: 'string', recommended_service: 'string',\n  why_now: 'string', confidence: 'number', sources: 'array',\n};\n\nconst requests = $('Build Research Request').all();\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const req = requests[i].json;\n  const res = $input.all()[i].json ?? {};\n  const errors = [];\n  const warnings = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Anthropic request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n\n    // Guard stop_reason before reading content: a refusal or a truncation both\n    // produce content that looks parseable but is not the answer.\n    if (res.stop_reason === 'refusal') {\n      errors.push('Model refused the request' +\n        (res.stop_details && res.stop_details.category ? ' (' + res.stop_details.category + ')' : ''));\n    } else if (res.stop_reason === 'max_tokens') {\n      errors.push('Response hit max_tokens and is truncated; raise LLM_MAX_TOKENS');\n    }\n\n    const blocks = Array.isArray(res.content) ? res.content : [];\n    raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('');\n\n    if (!errors.length) {\n      if (!raw.trim()) {\n        errors.push('Model returned no text content');\n      } else {\n        try {\n          parsed = JSON.parse(raw);\n        } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (parsed !== null) {\n    for (const key of Object.keys(REQUIRED)) {\n      const kind = REQUIRED[key];\n      if (!(key in parsed)) { errors.push('Missing required key: ' + key); continue; }\n      const v = parsed[key];\n      const isArr = Array.isArray(v);\n      if (kind === 'array' ? !isArr : (typeof v !== kind || isArr)) {\n        errors.push('Key ' + key + ' must be ' + kind + ', got ' + (isArr ? 'array' : typeof v));\n      }\n    }\n    if (typeof parsed.confidence === 'number' &&\n        (!Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1)) {\n      errors.push('confidence must be between 0 and 1, got ' + parsed.confidence);\n    }\n    if (typeof parsed.recommended_service === 'string' && !SERVICES.includes(parsed.recommended_service)) {\n      errors.push('recommended_service \"' + parsed.recommended_service + '\" is not in the allowed set');\n    }\n    if (Array.isArray(parsed.pain_signals)) {\n      for (const s of parsed.pain_signals) {\n        if (!s || typeof s !== 'object') { errors.push('pain_signals entries must be objects'); break; }\n        if (!SIGNAL_TYPES.includes(s.signal_type)) {\n          // The signals table has the same CHECK constraint; a bad value here\n          // would be a failed insert later, so reject it now.\n          errors.push('pain_signals.signal_type \"' + s.signal_type + '\" is not an allowed signal_type');\n        }\n      }\n    }\n  }\n\n  const valid = errors.length === 0;\n\n  // Only signals with real text survive: signals.signal has a non-empty CHECK.\n  const signals = valid\n    ? parsed.pain_signals\n        .filter((s) => typeof s.signal === 'string' && s.signal.trim() !== '')\n        .map((s) => ({\n          signal_type: s.signal_type,\n          signal: s.signal.trim(),\n          source: typeof s.source === 'string' ? s.source : '',\n          confidence: typeof s.confidence === 'number' ? s.confidence : 0.5,\n        }))\n    : [];\n\n  if (valid && parsed.pain_signals.length !== signals.length) {\n    warnings.push('Dropped ' + (parsed.pain_signals.length - signals.length) + ' pain_signals with empty text');\n  }\n\n  out.push({\n    json: {\n      agent_run_id: req.agent_run_id,\n      company_id: req.company_id,\n      name: req.name,\n      domain: req.domain,\n      prior_failures: req.prior_failures,\n      valid,\n      errors,\n      warnings,\n      error_message: valid ? null : 'Research validation failed: ' + errors.join('; '),\n      analysis: valid ? parsed : null,\n      signals,\n      raw_response: raw,\n      usage,\n    },\n  });\n}\n\nreturn out;\n"
+        "jsCode": "// Validate the research response against agents/research/schema.json.\n// Never throws, never repairs. A response that does not match is an error.\n//\n// Runs once per item: downstream of the triage branch, so the request this\n// response belongs to is reached through the paired-item link, not by index.\n\nconst SERVICES = ['infrastructure_audit', 'devops_improvement_sprint', 'fractional_devops_sre', 'none'];\nconst SIGNAL_TYPES = [\n  'hiring_devops', 'hiring_engineering_growth', 'kubernetes_adoption',\n  'cloud_migration', 'infrastructure_scaling', 'reliability_problem',\n  'cloud_cost_problem', 'leadership_change', 'funding',\n  'technology_announcement', 'other',\n];\nconst REQUIRED = {\n  company_summary: 'string', facts: 'array', technology: 'array',\n  hiring_signals: 'array', pain_signals: 'array', reasonable_inferences: 'array',\n  unknown: 'array', decision_maker_reason: 'string', recommended_service: 'string',\n  why_now: 'string', confidence: 'number', sources: 'array',\n};\n\nconst req = $('Build Research Request').item.json;\nconst res = $input.item.json ?? {};\n{\n  const errors = [];\n  const warnings = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Anthropic request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n\n    // Guard stop_reason before reading content: a refusal or a truncation both\n    // produce content that looks parseable but is not the answer.\n    if (res.stop_reason === 'refusal') {\n      errors.push('Model refused the request' +\n        (res.stop_details && res.stop_details.category ? ' (' + res.stop_details.category + ')' : ''));\n    } else if (res.stop_reason === 'max_tokens') {\n      errors.push('Response hit max_tokens and is truncated; raise LLM_MAX_TOKENS');\n    }\n\n    const blocks = Array.isArray(res.content) ? res.content : [];\n    raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('');\n\n    if (!errors.length) {\n      if (!raw.trim()) {\n        errors.push('Model returned no text content');\n      } else {\n        try {\n          parsed = JSON.parse(raw);\n        } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (parsed !== null) {\n    for (const key of Object.keys(REQUIRED)) {\n      const kind = REQUIRED[key];\n      if (!(key in parsed)) { errors.push('Missing required key: ' + key); continue; }\n      const v = parsed[key];\n      const isArr = Array.isArray(v);\n      if (kind === 'array' ? !isArr : (typeof v !== kind || isArr)) {\n        errors.push('Key ' + key + ' must be ' + kind + ', got ' + (isArr ? 'array' : typeof v));\n      }\n    }\n    if (typeof parsed.confidence === 'number' &&\n        (!Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1)) {\n      errors.push('confidence must be between 0 and 1, got ' + parsed.confidence);\n    }\n    if (typeof parsed.recommended_service === 'string' && !SERVICES.includes(parsed.recommended_service)) {\n      errors.push('recommended_service \"' + parsed.recommended_service + '\" is not in the allowed set');\n    }\n    if (Array.isArray(parsed.pain_signals)) {\n      for (const s of parsed.pain_signals) {\n        if (!s || typeof s !== 'object') { errors.push('pain_signals entries must be objects'); break; }\n        if (!SIGNAL_TYPES.includes(s.signal_type)) {\n          // The signals table has the same CHECK constraint; a bad value here\n          // would be a failed insert later, so reject it now.\n          errors.push('pain_signals.signal_type \"' + s.signal_type + '\" is not an allowed signal_type');\n        }\n      }\n    }\n  }\n\n  const valid = errors.length === 0;\n\n  // Only signals with real text survive: signals.signal has a non-empty CHECK.\n  const signals = valid\n    ? parsed.pain_signals\n        .filter((s) => typeof s.signal === 'string' && s.signal.trim() !== '')\n        .map((s) => ({\n          signal_type: s.signal_type,\n          signal: s.signal.trim(),\n          source: typeof s.source === 'string' ? s.source : '',\n          confidence: typeof s.confidence === 'number' ? s.confidence : 0.5,\n        }))\n    : [];\n\n  if (valid && parsed.pain_signals.length !== signals.length) {\n    warnings.push('Dropped ' + (parsed.pain_signals.length - signals.length) + ' pain_signals with empty text');\n  }\n\n  var result = {\n    json: {\n      agent_run_id: req.agent_run_id,\n      company_id: req.company_id,\n      name: req.name,\n      domain: req.domain,\n      prior_failures: req.prior_failures,\n      valid,\n      errors,\n      warnings,\n      error_message: valid ? null : 'Research validation failed: ' + errors.join('; '),\n      analysis: valid ? parsed : null,\n      signals,\n      raw_response: raw,\n      usage,\n    },\n  };\n}\n\nreturn result;\n",
+        "mode": "runOnceForEachItem"
       },
-      "id": "c2-09",
+      "id": "c2-14",
       "name": "Validate Research",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1740,
-        300
+        2940,
+        140
       ],
       "notes": "Checks agents/research/schema.json, plus stop_reason for refusal and truncation."
     },
@@ -334,8 +537,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1940,
-        300
+        3140,
+        140
       ]
     },
     {
@@ -346,13 +549,13 @@
           "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, agent_run_id: $json.agent_run_id, analysis: $json.analysis, signals: $json.signals } ) }}"
         }
       },
-      "id": "p2-10",
+      "id": "p2-15",
       "name": "Store Research",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2160,
-        180
+        3340,
+        40
       ],
       "credentials": {
         "postgres": {
@@ -370,13 +573,13 @@
           "queryReplacement": "={{ JSON.stringify({ agent_run_id: $('Validate Research').item.json.agent_run_id, usage: $('Validate Research').item.json.usage, output: { validated: true, warnings: $('Validate Research').item.json.warnings, analysis: $('Validate Research').item.json.analysis, raw_response: $('Validate Research').item.json.raw_response, signals_inserted: $json.signals_inserted } } ) }}"
         }
       },
-      "id": "p2-11",
+      "id": "p2-16",
       "name": "Close Run Success",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2360,
-        180
+        3540,
+        40
       ],
       "credentials": {
         "postgres": {
@@ -458,8 +661,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        2560,
-        180
+        3740,
+        40
       ]
     },
     {
@@ -470,13 +673,13 @@
           "queryReplacement": "={{ JSON.stringify({ agent_run_id: $json.agent_run_id, company_id: $json.company_id, prior_failures: $json.prior_failures, error: $json.error_message, output: { validated: false, errors: $json.errors, raw_response: $json.raw_response } } ) }}"
         }
       },
-      "id": "p2-12",
+      "id": "p2-17",
       "name": "Close Run Error",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2160,
-        440
+        3340,
+        280
       ],
       "credentials": {
         "postgres": {
@@ -591,7 +794,91 @@
       "main": [
         [
           {
+            "node": "Open Triage Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Triage Run": {
+      "main": [
+        [
+          {
+            "node": "Build Triage Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Triage Request": {
+      "main": [
+        [
+          {
+            "node": "Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage": {
+      "main": [
+        [
+          {
+            "node": "Validate Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Triage": {
+      "main": [
+        [
+          {
+            "node": "Close Triage Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Triage Run": {
+      "main": [
+        [
+          {
+            "node": "Worth Researching?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Researching?": {
+      "main": [
+        [
+          {
             "node": "Open Agent Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Park Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Park Company": {
+      "main": [
+        [
+          {
+            "node": "Skipped",
             "type": "main",
             "index": 0
           }

@@ -113,9 +113,27 @@ Two things to know about the alternatives already on this machine:
   (`ollama create` from a Modelfile with `PARAMETER num_ctx`), which is what
   `qwen9-64k` and `qwen27-32k` are.
 
+- **The schema constrains keys and types, not enums or numeric bounds.** In a
+  real scoring run the model returned `total_score: 109` against a schema maximum
+  of 100, and put a score band in a field whose enum has four offer names in it.
+  Treat `required` and `type` as enforced and everything else as advisory.
+
 - **Validate the response anyway.** Enforcement fixes the shape, not the
   judgement: the schema will happily accept `confidence: 0.95` on four lines of
   evidence.
+
+- **`reasoning_effort: "none"` turns thinking off; nothing else does.** On
+  `/v1/chat/completions`, `reasoning_effort: "low"` still produced 41000
+  characters of reasoning and `chat_template_kwargs: {enable_thinking: false}`
+  produced 47000 and then ran out of budget. `"none"` produced zero. Reasoning
+  tokens are **not** counted in `usage.completion_tokens` but they do consume
+  `max_tokens`, so a request sized for the answer alone comes back
+  `finish_reason: length` with empty content and a usage figure that makes it
+  look like nothing happened.
+
+  Whether to turn it off is per task, not global: scoring is 13 seconds without
+  it against 218 with, and the scores are no worse. Research without it dropped
+  six required keys.
 
 ## What the local model is used for
 
@@ -130,7 +148,8 @@ Two things to know about the alternatives already on this machine:
 | Model | Job | Time |
 |---|---|---|
 | `llama3.1:8b` | triage | 5-9s |
-| `qwen9-64k` | research | ~170s |
+| `qwen9-64k` | research (reasoning on) | ~170s |
+| `qwen9-64k` | scoring (reasoning off) | ~13s |
 | `qwen27-32k` | research | ~550s, and it spills to the CPU at 32k context |
 
 The 27B model is better calibrated - `confidence` 0.6 against the 9B's 0.92 on
@@ -138,7 +157,7 @@ the same material - and gives more specific `unknown` entries. It is also three
 times slower and does not fit in memory alongside a 16 GB Docker allocation.
 `qwen9-64k` is the working default.
 
-Scoring, outreach and conversation still assume an external model. Whether that
-survives contact with WF-04 is an open question: the local model's evidence
-extraction is good and its judgement is not calibrated, and scoring is judgement.
-See `docs/company-research.md`.
+| WF-04 scoring | Apply the rubric | Free, and the rubric's checkable rules are enforced in code rather than trusted - see `docs/lead-scoring.md` |
+
+Outreach and conversation still assume an external model. That is where the
+local model's uncalibrated judgement would show up in something a human reads.

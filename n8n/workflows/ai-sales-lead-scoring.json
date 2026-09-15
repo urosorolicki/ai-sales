@@ -1,0 +1,494 @@
+{
+  "id": "wf04LeadScoring",
+  "name": "AI Sales — WF-04 Lead Scoring",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "n4-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -880,
+        300
+      ],
+      "notes": "docs/workflows.md has WF-02 calling this on completion. It polls instead: PostgreSQL is the queue (docs/architecture.md), and a scoring failure must not be able to fail a research run."
+    },
+    {
+      "parameters": {
+        "fileSelector": "/prompts/scoring.md",
+        "options": {}
+      },
+      "id": "n4-readprompt",
+      "name": "Read Scoring Prompt",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -680,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "n4-prompttext",
+      "name": "Prompt To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/agents/scoring/schema.json",
+        "options": {}
+      },
+      "id": "n4-readschema",
+      "name": "Read Scoring Schema",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -680,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "n4-schematext",
+      "name": "Schema To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claim researched companies and open their scoring run in one statement.\n--\n-- companies has no 'scoring' status, and inventing one would mean a migration\n-- for a transient state. The agent_runs row IS the claim: a company with a\n-- scoring run still 'running' is skipped. The 15 minute window means a run that\n-- died without WF-99 closing it does not block the company forever.\n--\n-- FOR UPDATE SKIP LOCKED on top of that, so two overlapping schedules take\n-- different companies rather than the same one.\nWITH claimed AS (\n    SELECT c.id\n    FROM companies c\n    WHERE c.status = 'researched'\n      AND NOT EXISTS (\n          SELECT 1 FROM agent_runs r\n          WHERE r.company_id = c.id\n            AND r.agent_name = 'scoring'\n            AND r.status     = 'running'\n            AND r.started_at > now() - interval '15 minutes'\n      )\n    ORDER BY c.created_at\n    LIMIT ($1::jsonb ->> 'batch_size')::int\n    FOR UPDATE SKIP LOCKED\n),\nopened AS (\n    INSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\n    SELECT 'scoring', claimed.id, $1::jsonb -> 'input', 'running', $1::jsonb ->> 'model', now()\n    FROM claimed\n    RETURNING id AS agent_run_id, company_id\n)\nSELECT o.agent_run_id,\n       c.id AS company_id,\n       c.name,\n       c.domain::text AS domain,\n       c.industry,\n       c.employee_count,\n       c.description,\n       c.tech_stack,\n       c.hiring_signals,\n       -- The suppression trigger on outreach is the real guard; this is so\n       -- scoring does not spend a model call on a company that can never be\n       -- contacted.\n       is_suppressed(('x@' || c.domain)::citext) AS domain_suppressed,\n       COALESCE((\n           SELECT (r.output #>> '{analysis,confidence}')::numeric\n           FROM agent_runs r\n           WHERE r.company_id = c.id AND r.agent_name = 'research' AND r.status = 'success'\n           ORDER BY r.finished_at DESC NULLS LAST\n           LIMIT 1\n       ), 0) AS research_confidence,\n       -- The research agent already chose an offer and WF-02 validated it against\n       -- the enum. Asking the scoring model for it again only adds a way to be\n       -- wrong, so it is carried through instead.\n       (\n           SELECT r.output #>> '{analysis,recommended_service}'\n           FROM agent_runs r\n           WHERE r.company_id = c.id AND r.agent_name = 'research' AND r.status = 'success'\n           ORDER BY r.finished_at DESC NULLS LAST\n           LIMIT 1\n       ) AS research_offer,\n       COALESCE((\n           SELECT json_agg(json_build_object(\n                      'signal_type', s.signal_type, 'signal', s.signal,\n                      'source_url', s.source_url, 'confidence', s.confidence)\n                  ORDER BY s.created_at)\n           FROM signals s WHERE s.company_id = c.id\n       ), '[]'::json) AS signals,\n       COALESCE((\n           SELECT json_agg(json_build_object(\n                      'person_id', p.id, 'full_name', p.full_name, 'title', p.title,\n                      'seniority', p.seniority, 'email', p.email::text,\n                      'email_status', p.email_status))\n           FROM people p WHERE p.company_id = c.id\n       ), '[]'::json) AS people\nFROM opened o\nJOIN companies c ON c.id = o.company_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ batch_size: 5, model: $env.OLLAMA_SCORING_MODEL || 'qwen9-64k:latest', input: { execution_id: String($execution.id), workflow_id: $workflow.id, stage: 'scoring' } } ) }}"
+        }
+      },
+      "id": "p4-01",
+      "name": "Claim And Open Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "The agent_runs row is the claim. companies has no 'scoring' status and one is not worth a migration."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the scoring request. The rubric comes from prompts/scoring.md and the\n// output contract from agents/scoring/schema.json, both read from disk, so\n// neither is restated here and neither can drift from this node.\n\nconst MODEL = $env.OLLAMA_SCORING_MODEL || 'qwen9-64k:latest';\n\nfunction extractSystemPrompt(markdown) {\n  const section = markdown.split(/^##\\s+System prompt\\s*$/m)[1];\n  if (!section) throw new Error('prompts/scoring.md: no \"## System prompt\" heading found');\n  const fence = section.match(/```[a-z]*\\n([\\s\\S]*?)\\n```/);\n  if (!fence) throw new Error('prompts/scoring.md: no fenced block under \"## System prompt\"');\n  const text = fence[1].trim();\n  if (text.length < 200) throw new Error('prompts/scoring.md: system prompt looks truncated');\n  return text;\n}\n\n// The rubric itself is the part of scoring.md above the system prompt. The model\n// is told to apply it literally, so it has to be able to read it.\nfunction extractRubric(markdown) {\n  const start = markdown.indexOf('## The rubric');\n  const end = markdown.indexOf('## System prompt');\n  if (start === -1 || end === -1 || end <= start) {\n    throw new Error('prompts/scoring.md: could not locate the rubric section');\n  }\n  return markdown.slice(start, end).trim();\n}\n\nconst doc = $('Prompt To Text').first().json.data;\nconst systemPrompt = extractSystemPrompt(doc) + '\\n\\n' + extractRubric(doc);\n\nconst schema = JSON.parse($('Schema To Text').first().json.data);\ndelete schema.$schema;\ndelete schema.$id;\ndelete schema.title;\n\nreturn $input.all().map((item) => {\n  const c = item.json;\n  const signals = c.signals || [];\n  const people = c.people || [];\n\n  const lines = [\n    'COMPANY',\n    'Name: ' + c.name,\n    'Domain: ' + c.domain,\n    'Industry: ' + (c.industry || 'unknown'),\n    'Employee count: ' + (c.employee_count === null || c.employee_count === undefined ? 'unknown' : c.employee_count),\n    'Description: ' + (c.description || 'unknown'),\n    '',\n    'TECHNOLOGY (from research, each item carries its own source)',\n    JSON.stringify(c.tech_stack || [], null, 1),\n    '',\n    'HIRING SIGNALS (from research)',\n    JSON.stringify(c.hiring_signals || [], null, 1),\n    '',\n    'SIGNALS TABLE (the evidence rows; source_url present means it is a fact, not an inference)',\n    JSON.stringify(signals, null, 1),\n    '',\n    'PEOPLE',\n    people.length ? JSON.stringify(people, null, 1) : 'None known. There is no route to a decision maker.',\n    '',\n    'RESEARCH CONFIDENCE: ' + c.research_confidence,\n    '',\n    'Score this company against the rubric. Award points only for evidence above.',\n    'Absent evidence scores zero, never \"average\".',\n  ];\n\n  return {\n    json: {\n      agent_run_id: c.agent_run_id,\n      company_id: c.company_id,\n      name: c.name,\n      domain: c.domain,\n      model: MODEL,\n      llm_request: {\n        model: MODEL,\n        temperature: 0.2,\n        max_tokens: 4000,\n        // qwen reasoning models spend their whole budget thinking: 25000\n        // characters of reasoning against 1000 of answer, and 218 seconds\n        // against 13. The rubric is explicit enough that the visible answer is\n        // as good without it. See docs/ollama.md.\n        reasoning_effort: 'none',\n        messages: [\n          { role: 'system', content: systemPrompt },\n          { role: 'user', content: lines.join('\\n') },\n        ],\n        response_format: {\n          type: 'json_schema',\n          json_schema: { name: 'scoring', strict: true, schema },\n        },\n      },\n    },\n  };\n});\n"
+      },
+      "id": "c4-02",
+      "name": "Build Scoring Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        300
+      ],
+      "notes": "Rubric and schema both read from disk."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://ollama:11434') + '/v1/chat/completions' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "id": "n4-llm",
+      "name": "Scoring Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Local Ollama, OpenAI-compatible endpoint with a strict json_schema. See docs/ollama.md."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the scoring response, then apply the mechanical guards.\n//\n// The rubric in prompts/scoring.md already states rules that are checkable\n// against the database - \"only count technology with a source\", \"an empty\n// technology array scores 0\", \"reasonable_inferences can reach at most 12\",\n// \"posted within 60 days\". A model that is not well calibrated will not obey\n// them reliably, so they are enforced here rather than trusted. Every cap is\n// recorded, so a run can be explained later.\n//\n// docs/architecture.md: the rules that matter are enforced, not requested.\n\nconst schema = JSON.parse($('Schema To Text').first().json.data);\nconst claims = $('Claim And Open Run').all();\nconst requests = $('Build Scoring Request').all();\n\nconst COMPONENTS = {\n  company_fit: 20, technology_fit: 20, hiring_signal: 20,\n  pain_evidence: 20, decision_maker: 10, commercial_potential: 10,\n};\n\n// Anything that sells the same service is a competitor, not a prospect.\nconst COMPETITOR_PATTERNS = [\n  /\\bdevops\\b[^.]{0,40}\\b(consult|agency|partner|services)/i,\n  /\\b(sre|site reliability)\\b[^.]{0,40}\\b(consult|agency|services)/i,\n  /\\bplatform engineering\\b[^.]{0,40}\\b(consult|agency|services)/i,\n  /\\b(cloud|kubernetes)\\b[^.]{0,30}\\bconsultanc/i,\n  /\\bmanaged service provider\\b/i,\n];\n\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const req = requests[i].json;\n  const claim = claims[i].json;\n  const res = $input.all()[i].json ?? {};\n\n  const errors = [];\n  const notes = [];\n  const overrides = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Scoring model request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n    const choice = Array.isArray(res.choices) ? res.choices[0] : null;\n    if (!choice) {\n      errors.push('Response contained no choices');\n    } else if (choice.finish_reason === 'length') {\n      errors.push('Response hit the token limit and is truncated. Use a model with a ' +\n        'larger context window (OLLAMA_SCORING_MODEL)');\n    } else {\n      raw = (choice.message && choice.message.content) || '';\n      if (!raw.trim()) {\n        errors.push('Model returned no text content');\n      } else {\n        try { parsed = JSON.parse(raw); } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (parsed !== null) {\n    for (const key of schema.required) {\n      if (!(key in parsed)) errors.push('Missing required key: ' + key);\n    }\n    for (const key of Object.keys(COMPONENTS)) {\n      const c = parsed[key];\n      if (!c || typeof c !== 'object' || typeof c.points !== 'number') {\n        errors.push(key + ' must be an object with numeric points');\n      } else if (!Number.isInteger(c.points) || c.points < 0 || c.points > COMPONENTS[key]) {\n        errors.push(key + '.points must be an integer 0-' + COMPONENTS[key] + ', got ' + c.points);\n      }\n    }\n    // recommended_offer and total_score are recorded, not used: the offer is\n    // carried through from research and the total is a generated column. The\n    // json_schema constrains keys and types but NOT enums or numeric bounds -\n    // this model has returned a band in the offer field and a total of 109 -\n    // so nothing downstream may depend on either.\n  }\n\n  if (errors.length) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, company_id: req.company_id,\n      name: req.name, domain: req.domain,\n      valid: false, errors, notes: [], overrides: [],\n      error_message: 'Scoring validation failed: ' + errors.join('; '),\n      scores: null, lead: null, raw_response: raw, usage,\n    } });\n    continue;\n  }\n\n  // ---- mechanical guards --------------------------------------------------\n  const points = {};\n  for (const key of Object.keys(COMPONENTS)) points[key] = parsed[key].points;\n\n  const signals = claim.signals || [];\n  const people = claim.people || [];\n  const tech = Array.isArray(claim.tech_stack) ? claim.tech_stack : [];\n  const hiring = Array.isArray(claim.hiring_signals) ? claim.hiring_signals : [];\n\n  function cap(key, ceiling, why) {\n    if (points[key] > ceiling) {\n      overrides.push(key + ' capped ' + points[key] + ' -> ' + ceiling + ': ' + why);\n      points[key] = ceiling;\n    }\n  }\n\n  // \"Only count technology with a source. An empty technology array scores 0.\"\n  const sourcedTech = tech.filter((t) => t && typeof t === 'object' && t.source);\n  if (!sourcedTech.length) cap('technology_fit', 0, 'no technology with a source');\n\n  // \"reasonable_inferences can reach at most 12. Above that requires a fact\n  //  with a source.\" A signals row with a source_url is that fact.\n  const sourcedSignals = signals.filter((s) => s && s.source_url);\n  if (!signals.length) cap('pain_evidence', 0, 'no signals at all');\n  else if (!sourcedSignals.length) cap('pain_evidence', 12, 'no signal carries a source_url');\n\n  // \"18-20 requires an open senior DevOps/SRE/platform role posted within 60 days.\"\n  const now = Date.now();\n  const recentSenior = hiring.some((h) => {\n    if (!h || typeof h !== 'object') return false;\n    const role = String(h.role || '').toLowerCase();\n    const senior = /senior|lead|principal|staff|head/.test(String(h.seniority || '') + ' ' + role);\n    const infra = /devops|sre|site reliability|platform|infrastructure|cloud/.test(role);\n    const posted = h.posted_at ? Date.parse(h.posted_at) : NaN;\n    const fresh = Number.isFinite(posted) && (now - posted) <= 60 * 24 * 3600 * 1000;\n    return senior && infra && fresh;\n  });\n  if (!hiring.length) cap('hiring_signal', 0, 'no hiring signals');\n  else if (!recentSenior) cap('hiring_signal', 17, 'no senior infrastructure role dated within 60 days');\n\n  // Decision maker is fully mechanical - it is a property of the people table,\n  // not a judgement. The model's number is replaced, not capped.\n  let dm = 0;\n  let dmWhy = 'no person known';\n  const decisionMakers = people.filter((p) =>\n    /cto|chief tech|vp eng|vice president|head of|director|founder|owner/i.test(String(p.title || '')) ||\n    ['c_level', 'vp', 'head', 'director', 'founder'].includes(String(p.seniority || '')));\n  const best = decisionMakers[0] || people[0] || null;\n  if (best && best.email && best.email_status === 'valid') { dm = 10; dmWhy = 'named decision maker with a verified email'; }\n  else if (best && best.email) { dm = 7; dmWhy = 'named decision maker, email ' + best.email_status; }\n  else if (best) { dm = 4; dmWhy = 'person named but no email'; }\n  if (points.decision_maker !== dm) {\n    overrides.push('decision_maker set to ' + dm + ' from the people table (model said ' +\n      points.decision_maker + '): ' + dmWhy);\n    points.decision_maker = dm;\n  }\n\n  let fit = points.company_fit + points.technology_fit + points.commercial_potential;\n  let research = points.hiring_signal + points.pain_evidence;\n  let dmScore = points.decision_maker;\n\n  // ---- hard overrides -----------------------------------------------------\n  let status = 'scored';\n  let ceiling = 100;\n\n  if (claim.domain_suppressed) {\n    status = 'suppressed';\n    ceiling = 0;\n    overrides.push('domain is on the suppression list: company suppressed, no lead');\n  }\n\n  const haystack = [claim.name, claim.industry, claim.description].filter(Boolean).join(' ');\n  if (COMPETITOR_PATTERNS.some((re) => re.test(haystack))) {\n    ceiling = Math.min(ceiling, 39);\n    overrides.push('sells the same service: forced to IGNORE');\n  }\n\n  const confidence = Number(claim.research_confidence);\n  if (!Number.isFinite(confidence) || confidence < 0.3) {\n    ceiling = Math.min(ceiling, 39);\n    overrides.push('research confidence ' + claim.research_confidence +\n      ' is below 0.3: total capped at 39 until re-researched');\n  }\n\n  // Reduce research first, then fit: when the cap is because the evidence is not\n  // trustworthy, the evidence-derived half is the half to discount.\n  let total = fit + research + dmScore;\n  if (total > ceiling) {\n    const take = total - ceiling;\n    const fromResearch = Math.min(research, take);\n    research -= fromResearch;\n    const fromFit = Math.min(fit, take - fromResearch);\n    fit -= fromFit;\n    const fromDm = Math.min(dmScore, take - fromResearch - fromFit);\n    dmScore -= fromDm;\n    total = fit + research + dmScore;\n  }\n\n  // The database recomputes total_score and score_band as generated columns. A\n  // disagreement is recorded, not corrected: docs/scoring.md says the database\n  // value stands.\n  if (parsed.total_score !== total) {\n    notes.push('model total ' + parsed.total_score + ' differs from the stored total ' + total +\n      '; the database value stands');\n  }\n\n  // A lead needs a person. Without WF-03 there are none, so no lead is created\n  // and the company simply stays scored.\n  // docs/scoring.md: a suppressed domain gets no lead at all, not a suppressed\n  // one. Nothing downstream should ever have a row to reconsider.\n  const offers = schema.properties.recommended_offer.enum;\n  const offer = offers.includes(claim.research_offer) ? claim.research_offer : 'none';\n  if (parsed.recommended_offer !== offer) {\n    notes.push('offer taken from research (' + offer + '); the scoring model said \"' +\n      parsed.recommended_offer + '\"');\n  }\n\n  const lead = status !== 'suppressed' && best && best.person_id\n    ? { person_id: best.person_id, score: total,\n        reason: String(parsed.reason || '').slice(0, 400),\n        recommended_offer: offer,\n        status: 'new' }\n    : null;\n  if (!lead) {\n    notes.push(status === 'suppressed'\n      ? 'domain is suppressed, so no lead row was created'\n      : 'no person on file, so no lead row was created');\n  }\n\n  out.push({ json: {\n    agent_run_id: req.agent_run_id,\n    company_id: req.company_id,\n    name: req.name,\n    domain: req.domain,\n    valid: true,\n    errors: [],\n    notes,\n    overrides,\n    error_message: null,\n    scores: { fit_score: fit, research_score: research, decision_maker_score: dmScore,\n              total_score: total, company_status: status },\n    components: points,\n    lead,\n    model_output: parsed,\n    raw_response: raw,\n    usage,\n  } });\n}\n\nreturn out;\n"
+      },
+      "id": "c4-03",
+      "name": "Validate And Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        300
+      ],
+      "notes": "Schema validation, then the rubric's own mechanical rules are enforced rather than trusted. Every cap is recorded in overrides."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "s4-1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n4-if",
+      "name": "Scoring Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Write the three component columns and, when there is someone to contact, the\n-- lead. total_score and score_band are generated columns: the workflow must\n-- never write them, so the band can never disagree with its own parts.\nWITH payload AS (\n    SELECT $1::jsonb AS p\n),\nupd AS (\n    UPDATE companies c\n    SET fit_score            = (payload.p #>> '{scores,fit_score}')::smallint,\n        research_score       = (payload.p #>> '{scores,research_score}')::smallint,\n        decision_maker_score = (payload.p #>> '{scores,decision_maker_score}')::smallint,\n        status               = payload.p #>> '{scores,company_status}'\n    FROM payload\n    WHERE c.id = (payload.p ->> 'company_id')::uuid\n      AND c.status = 'researched'\n    RETURNING c.id, c.total_score, c.score_band, c.status\n),\nins AS (\n    INSERT INTO leads (company_id, person_id, score, reason, recommended_offer, status)\n    SELECT (payload.p ->> 'company_id')::uuid,\n           (payload.p #>> '{lead,person_id}')::uuid,\n           (payload.p #>> '{lead,score}')::smallint,\n           payload.p #>> '{lead,reason}',\n           payload.p #>> '{lead,recommended_offer}',\n           payload.p #>> '{lead,status}'\n    FROM payload\n    WHERE payload.p -> 'lead' IS NOT NULL\n      AND jsonb_typeof(payload.p -> 'lead') = 'object'\n    ON CONFLICT (company_id, person_id) DO UPDATE\n        SET score             = EXCLUDED.score,\n            reason            = EXCLUDED.reason,\n            recommended_offer = EXCLUDED.recommended_offer\n    RETURNING id\n)\nSELECT (SELECT count(*) FROM upd)::int   AS companies_scored,\n       (SELECT total_score FROM upd)     AS total_score,\n       (SELECT score_band FROM upd)      AS score_band,\n       (SELECT status FROM upd)          AS company_status,\n       (SELECT count(*) FROM ins)::int   AS leads_written,\n       $1::jsonb ->> 'agent_run_id'      AS agent_run_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, agent_run_id: $json.agent_run_id, scores: $json.scores, lead: $json.lead } ) }}"
+        }
+      },
+      "id": "p4-04",
+      "name": "Write Scores",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        840,
+        180
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Writes the three components only. total_score and score_band are generated."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE agent_runs\nSET status        = 'success',\n    output        = $1::jsonb -> 'output',\n    error         = NULL,\n    prompt_tokens = ($1::jsonb #>> '{usage,prompt_tokens}')::int,\n    output_tokens = ($1::jsonb #>> '{usage,completion_tokens}')::int,\n    finished_at   = now()\nWHERE id = ($1::jsonb ->> 'agent_run_id')::uuid\nRETURNING id, company_id, status, prompt_tokens, output_tokens, duration_ms;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ agent_run_id: $('Validate And Guard').item.json.agent_run_id, usage: $('Validate And Guard').item.json.usage, output: { validated: true, components: $('Validate And Guard').item.json.components, scores: $('Validate And Guard').item.json.scores, overrides: $('Validate And Guard').item.json.overrides, notes: $('Validate And Guard').item.json.notes, model_output: $('Validate And Guard').item.json.model_output, stored_band: $json.score_band, leads_written: $json.leads_written } } ) }}"
+        }
+      },
+      "id": "p4-05",
+      "name": "Close Run Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1060,
+        180
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "z1",
+              "name": "company",
+              "value": "={{ $('Validate And Guard').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "z2",
+              "name": "domain",
+              "value": "={{ $('Validate And Guard').item.json.domain }}",
+              "type": "string"
+            },
+            {
+              "id": "z3",
+              "name": "total_score",
+              "value": "={{ $('Write Scores').item.json.total_score }}",
+              "type": "number"
+            },
+            {
+              "id": "z4",
+              "name": "score_band",
+              "value": "={{ $('Write Scores').item.json.score_band }}",
+              "type": "string"
+            },
+            {
+              "id": "z5",
+              "name": "company_status",
+              "value": "={{ $('Write Scores').item.json.company_status }}",
+              "type": "string"
+            },
+            {
+              "id": "z6",
+              "name": "leads_written",
+              "value": "={{ $('Write Scores').item.json.leads_written }}",
+              "type": "number"
+            },
+            {
+              "id": "z7",
+              "name": "overrides",
+              "value": "={{ $('Validate And Guard').item.json.overrides.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "z8",
+              "name": "notes",
+              "value": "={{ $('Validate And Guard').item.json.notes.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "z9",
+              "name": "duration_ms",
+              "value": "={{ $json.duration_ms }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n4-done",
+      "name": "Scored",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1280,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close the run as failed and leave the company at 'researched' so the next\n-- scheduled pass picks it up again. Scoring has nothing to roll back: it never\n-- wrote a score.\nUPDATE agent_runs\nSET status      = 'error',\n    error       = COALESCE(NULLIF($1::jsonb ->> 'error', ''), 'Scoring failed with no message'),\n    output      = $1::jsonb -> 'output',\n    finished_at = now()\nWHERE id = ($1::jsonb ->> 'agent_run_id')::uuid\nRETURNING id, company_id, status, error;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ agent_run_id: $json.agent_run_id, error: $json.error_message, output: { validated: false, errors: $json.errors, raw_response: $json.raw_response } } ) }}"
+        }
+      },
+      "id": "p4-06",
+      "name": "Close Run Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        840,
+        440
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "The company stays at 'researched' and the next pass retries it."
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Read Scoring Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Scoring Prompt": {
+      "main": [
+        [
+          {
+            "node": "Prompt To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prompt To Text": {
+      "main": [
+        [
+          {
+            "node": "Read Scoring Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Scoring Schema": {
+      "main": [
+        [
+          {
+            "node": "Schema To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema To Text": {
+      "main": [
+        [
+          {
+            "node": "Claim And Open Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim And Open Run": {
+      "main": [
+        [
+          {
+            "node": "Build Scoring Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Scoring Request": {
+      "main": [
+        [
+          {
+            "node": "Scoring Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scoring Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate And Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate And Guard": {
+      "main": [
+        [
+          {
+            "node": "Scoring Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scoring Valid?": {
+      "main": [
+        [
+          {
+            "node": "Write Scores",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Close Run Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Scores": {
+      "main": [
+        [
+          {
+            "node": "Close Run Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Run Success": {
+      "main": [
+        [
+          {
+            "node": "Scored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

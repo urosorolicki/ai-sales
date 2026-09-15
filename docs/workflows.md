@@ -79,9 +79,13 @@ per-domain rate limiting are not implemented.
 
 ## WF-04 Lead Scoring
 
+**Built** - see `docs/lead-scoring.md`. It polls for researched companies rather
+than being called by WF-02, and the rubric's checkable rules are enforced in code
+rather than trusted to the model. The nightly re-scoring sweep is not built.
+
 | | |
 |---|---|
-| Trigger | Called by WF-02 on completion, plus a nightly sweep for re-scoring |
+| Trigger | Schedule, every 15 minutes (not called by WF-02 - see `docs/lead-scoring.md`) |
 | Input | A researched company, its `signals`, its `people` |
 | Output | `companies.fit_score`, `research_score`, `decision_maker_score`, `status = 'scored'`; `leads` rows for contactable decision makers |
 | Guards | Never writes `total_score` or `score_band`, which are generated columns. Applies the hard overrides from `docs/scoring.md`. |

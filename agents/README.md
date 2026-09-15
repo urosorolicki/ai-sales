@@ -10,7 +10,7 @@ retries and state - which n8n already solves - not agent autonomy.
 
 | Agent | Prompt | Workflow | Model | Writes |
 |---|---|---|---|---|
-| research | `prompts/research.md` | WF-02 | `claude-sonnet-5` | `companies`, `signals` |
+| research | `prompts/research.md` | WF-02 | Ollama (`OLLAMA_RESEARCH_MODEL`) | `companies`, `signals` |
 | scoring | `prompts/scoring.md` | WF-04 | external LLM | `companies.*_score`, `leads` |
 | outreach | `prompts/outreach.md` | WF-05 | external LLM | `outreach` (draft) |
 | classifier | `prompts/classifier.md` | WF-08 | Ollama, escalating to external LLM | `messages.classification`, `suppression_list` |
@@ -44,10 +44,9 @@ Every agent directory contains:
    human approved.
 5. **Temperature stays low, where the model accepts one.** `LLM_TEMPERATURE=0.2`
    applies to Ollama. It does **not** apply to `claude-sonnet-5`, which rejects
-   `temperature`, `top_p` and `top_k` with an HTTP 400 - WF-02 therefore sends no
-   sampling parameters at all. These are extraction and judgement tasks;
-   creativity here shows up as invented facts, and on the external model that is
-   controlled by the prompt and by validation rather than by a sampling knob.
+   `temperature`, `top_p` and `top_k` with an HTTP 400 - anything moved to that
+   model must send no sampling parameters at all. These are extraction and
+   judgement tasks; creativity here shows up as invented facts.
 6. **Model choice is cost, not capability, until proven otherwise.** The
    classifier runs locally because it is high volume and structurally simple.
    Research and conversation use the external model because being wrong there

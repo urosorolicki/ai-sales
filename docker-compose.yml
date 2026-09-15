@@ -117,6 +117,7 @@ services:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/workflows:ro
       - ./prompts:/prompts:ro
+      - ./agents:/agents:ro
     ports:
       - "${N8N_BIND_ADDR:-127.0.0.1}:${N8N_BIND_PORT:-5678}:5678"
     healthcheck:

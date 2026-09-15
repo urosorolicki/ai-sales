@@ -91,19 +91,54 @@ Two things to know about the alternatives already on this machine:
   `content`. Send `"think": false` on `/api/chat`, or raise the budget
   substantially. The n8n Ollama Chat Model node does not expose `think`, which is
   why WF-00 uses a non-reasoning model.
-- **Structured outputs behave differently between versions.** Passing a JSON
-  Schema as `format` constrained output to every required key on 0.5.4, but not
-  on 0.31.1 with the research schema - the model returned the array fields and
-  omitted the scalar ones. Do not assume `format` guarantees a schema; validate
-  the response regardless. WF-02 does.
+- **Structured outputs work on `/v1/chat/completions`, not on `/api/chat`.** On
+  the installed version `/api/chat` silently ignores `format`: a schema requiring
+  two keys produced neither, an enum of three colours produced a fourth, and the
+  research schema came back with the array fields and none of the scalar ones,
+  across two different models. The OpenAI-compatible endpoint with
+
+  ```json
+  "response_format": {"type": "json_schema",
+                      "json_schema": {"name": "x", "strict": true, "schema": {...}}}
+  ```
+
+  is enforced: exactly the required keys, no extras. It also puts a reasoning
+  model's thinking in a separate `reasoning` field, so `content` is clean JSON
+  without needing `think: false`. WF-02 uses that endpoint.
+
+- **`/v1/chat/completions` takes no `options`, so `num_ctx` cannot be set per
+  request.** The context window comes from the model, and the default 4096 is not
+  enough for a schema plus a page of material - the object is cut off mid-key and
+  `finish_reason` comes back `length`. Use a model built with a larger window
+  (`ollama create` from a Modelfile with `PARAMETER num_ctx`), which is what
+  `qwen9-64k` and `qwen27-32k` are.
+
+- **Validate the response anyway.** Enforcement fixes the shape, not the
+  judgement: the schema will happily accept `confidence: 0.95` on four lines of
+  evidence.
 
 ## What the local model is used for
 
 | Where | Job | Why local |
 |---|---|---|
 | WF-00 | Pipeline smoke test | It only has to prove the wiring works |
-| WF-02 triage | Yes/no: is there anything here worth a paid call | High volume, structurally simple, and a wrong answer is caught by being biased towards yes |
+| WF-02 triage | Yes/no: is there anything here worth the bigger model | High volume, structurally simple, and a wrong answer is caught by being biased towards yes |
+| WF-02 research | The full evidence file | Free, and good enough at extraction - see below |
 
-Research, scoring, outreach and conversation use the external model. That is a
-cost decision, not a permanent one - see `docs/company-research.md` for what the
-local model actually produced when asked to do the research itself.
+### Measured
+
+| Model | Job | Time |
+|---|---|---|
+| `llama3.1:8b` | triage | 5-9s |
+| `qwen9-64k` | research | ~170s |
+| `qwen27-32k` | research | ~550s, and it spills to the CPU at 32k context |
+
+The 27B model is better calibrated - `confidence` 0.6 against the 9B's 0.92 on
+the same material - and gives more specific `unknown` entries. It is also three
+times slower and does not fit in memory alongside a 16 GB Docker allocation.
+`qwen9-64k` is the working default.
+
+Scoring, outreach and conversation still assume an external model. Whether that
+survives contact with WF-04 is an open question: the local model's evidence
+extraction is good and its judgement is not calibrated, and scoring is judgement.
+See `docs/company-research.md`.

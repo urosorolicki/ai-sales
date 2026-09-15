@@ -18,7 +18,7 @@ Every 30 Minutes
   -> Worth Researching?
         +-- false -> Park Company -> Skipped                            (no paid call)
         +-- true  -> Open Agent Run
-                     -> Build Research Request -> Research Agent        (Anthropic, paid)
+                     -> Build Research Request -> Research Agent        (local, free)
                      -> Validate Research -> Research Valid?
                           +-- true  -> Store Research -> Close Run Success -> Researched
                           +-- false -> Close Run Error
@@ -29,8 +29,12 @@ Every 30 Minutes
 The expensive model is only called for companies that survive a free local
 filter.
 
-**Triage** runs on Ollama (`llama3.1:8b`) and answers exactly one question: is
-there anything in this material worth paying a stronger model to look at? It
+Both models are local and both are free. The split is about speed, not money:
+triage is small and runs on every company, research is large and runs only on
+the ones that survive it.
+
+**Triage** runs on `llama3.1:8b` (`OLLAMA_MODEL`) and answers exactly one
+question: is there anything in this material worth handing to the bigger model? It
 does not analyse the company, list its stack or judge it as a customer. A small
 yes/no is what an 8B model is reliably good at, and it is the role
 `agents/README.md` already assigns to the local model - which is why the triage
@@ -56,18 +60,38 @@ Two things are checked before the model's opinion counts:
 A skipped company is parked at `status = 'ignored'` with the reason on its
 `classifier` run in `agent_runs`. Setting it back to `new` re-queues it.
 
+**Research** runs on `qwen9-64k` (`OLLAMA_RESEARCH_MODEL`), a 9B model with a
+64k context window. The context size is not optional: the research schema plus a
+page of fetched material does not fit in Ollama's default 4096 tokens, and the
+object comes back cut off mid-key. That failure is caught - `finish_reason` of
+`length` is a validation error naming the fix - but the run is wasted.
+
+### The endpoint matters
+
+Research posts to Ollama's **OpenAI-compatible** endpoint,
+`/v1/chat/completions`, not to `/api/chat`.
+
+On the installed version, `/api/chat` silently ignores `format`. A schema
+requiring two keys produced neither of them, an enum of three colours produced a
+fourth, and the full research schema came back with the array fields and none of
+the scalar ones - across two different models. `response_format` with
+`strict: true` on `/v1/chat/completions` is enforced: exactly the required keys,
+no extras.
+
+Validation still runs regardless. Enforcement fixes the *shape*; it does nothing
+about a `confidence` of 0.95 on four lines of evidence.
+
 ### Measured on this machine
 
-| | Time | Cost |
-|---|---|---|
-| Triage, clearly relevant material | 26s | free |
-| Triage, marketing site | 7s | free |
-| Triage, ambiguous | 5s | free |
-| Full research | seconds | ~2-3c |
+One company, six pages, end to end through n8n:
 
-Those numbers were measured with Ollama in a container, on the CPU. It now runs
-natively on the host with Metal, which is several times faster - see
-`docs/ollama.md`.
+| | Time |
+|---|---|
+| Triage (`llama3.1:8b`) | 9s |
+| Research (`qwen9-64k`) | 171s, 5068 in / 1002 out tokens |
+| **Whole workflow** | **under 3 minutes, no cost** |
+
+Both on the GPU. See `docs/ollama.md` for why Ollama is not in a container.
 
 ## The prompt is read from disk, not embedded
 
@@ -100,34 +124,54 @@ HTML is reduced to text with script, style and comment blocks removed, capped at
 6000 characters per page and 24000 in total. An unbounded page is an unbounded
 bill.
 
-## Model configuration
+## What the local model is and is not good at
 
-| | |
-|---|---|
-| Model | `LLM_MODEL`, currently `claude-sonnet-5` |
-| Max tokens | `LLM_MAX_TOKENS`, currently 4096 |
-| Temperature | **not sent** - see below |
-| Caching | `cache_control: ephemeral` on the system prompt |
+From a real run against a site with an open SRE role, a Terraform requirement, a
+45-minute CI pipeline and two incidents caused by a manual release step:
 
-**`LLM_TEMPERATURE` does not apply to this model.** `claude-sonnet-5` rejects
-`temperature`, `top_p` and `top_k` with an HTTP 400. Sending the 0.2 from `.env`
-would fail every request. Assistant prefill is rejected the same way, so JSON is
-obtained by instruction and enforced by validation, not by prefilling `{`.
+**Good.** Seven pain signals with varied, correct `signal_type` values;
+eight technologies, all of them actually named in the material; the right
+`recommended_service`; correct source URLs; sensible `unknown` entries.
 
-The system prompt is identical for every company in a batch and between runs, so
-it carries a cache breakpoint. Check `usage.cache_read_input_tokens` on the
-stored `agent_runs.output` to confirm it is being hit.
+**Weak.** `company_summary` comes back as the company's name rather than the two
+sentences the prompt asks for - every qwen model tested did this. `why_now` came
+back as `active_hiring_for_infrastructure_fixes` rather than a sentence. Every
+signal was given `confidence: 1.00`. `confidence` for the whole file was 0.95 on
+thin evidence, where the prompt explicitly asks for a low number.
+
+So the evidence extraction is usable and the *judgement* is not calibrated. That
+matters for WF-04, which scores on these fields.
+
+### Moving research to an external model
+
+`prompts/research.md` and `agents/research/schema.json` do not change. Three
+things do:
+
+1. **Research Agent** node: URL to `https://api.anthropic.com/v1/messages`,
+   authentication to the `anthropicApi` credential, and an
+   `anthropic-version: 2023-06-01` header.
+2. **Build Research Request**: Anthropic's shape - `system` as a list of blocks
+   with `cache_control`, `max_tokens` top level, no `response_format`. Send **no
+   `temperature`**: `claude-sonnet-5` rejects sampling parameters with a 400, so
+   `LLM_TEMPERATURE` does not apply to it. Assistant prefill is rejected the same
+   way, so JSON comes from the instruction and from validation.
+3. **Validate Research** and **Close Run Success**: `content[].text` and
+   `stop_reason` instead of `choices[].message.content` and `finish_reason`;
+   `usage.input_tokens` / `output_tokens` instead of `prompt_tokens` /
+   `completion_tokens`.
+
+That version is in the history at commit `7360d9b` if it is wanted back.
 
 ## Validation
 
-The response is checked against `agents/research/schema.json`: all twelve
-required keys, their types, `confidence` in 0-1, `recommended_service` in its
-enum, and every `pain_signals.signal_type` against the same enum the `signals`
-table enforces - so a bad value fails here rather than as a failed insert later.
+`agents/research/schema.json` is read from disk at runtime (`./agents` is mounted
+read-only at `/agents`) and drives both halves: it is sent to the model as the
+`response_format` schema, and the validator reads the required keys, the types,
+the `confidence` bounds and both enums straight out of it. There is one
+definition of the contract, not a copy in the workflow that can drift.
 
-`stop_reason` is checked **before** the content is read. A `refusal` and a
-`max_tokens` truncation both produce output that looks parseable but is not the
-answer.
+`finish_reason` is checked **before** the content is read: a truncated object
+looks parseable right up to the point where it is not.
 
 Nothing is repaired. A markdown fence around otherwise-valid JSON fails the run.
 
@@ -174,13 +218,12 @@ WF-99 is set as the error workflow, and `$execution.id` is recorded in
 | Credential | Type | Status |
 |---|---|---|
 | Postgres account | `postgres` | exists |
-| **Anthropic** | `anthropicApi` | **must be created** |
 
-Triage needs no credential: Ollama has no authentication, and its base URL is
-configuration rather than a secret. Until the Anthropic credential exists, every
-company that passes triage fails with `Credentials not found`, is recorded as an
-error run and returns to the queue - so nothing is lost, and the free half of the
-pipeline keeps working.
+That is the only one. Neither model needs a credential: Ollama has no
+authentication, and its base URL is configuration rather than a secret.
+
+Both models must be pulled on the host - `llama3.1:8b` and whatever
+`OLLAMA_RESEARCH_MODEL` names. `make health` reports how many are present.
 
 Create it under Credentials > New > Anthropic, paste the API key, then open the
 **Research Agent** node and select it. `docs/security.md` requires credentials to
@@ -206,7 +249,9 @@ VALUES ('Some Company', 'somecompany.com', 'https://somecompany.com', 'SaaS', 'n
 ```
 
 It claims five companies per run. That number is in the `Claim Companies` node;
-there is no environment variable for it yet.
+there is no environment variable for it yet. At roughly three minutes each, a
+full batch takes about fifteen minutes - comfortably inside the thirty minute
+schedule, but not by much.
 
 ## Verifying
 

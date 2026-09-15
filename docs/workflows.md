@@ -52,6 +52,10 @@ Finds candidate companies. Does not research them.
 
 ## WF-02 Company Research
 
+**Built** - see `docs/company-research.md`. Playwright and cross-run per-domain
+rate limiting are not implemented; the Anthropic credential must be created
+before it can run.
+
 | | |
 |---|---|
 | Trigger | Schedule, every 30 minutes |

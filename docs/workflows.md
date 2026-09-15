@@ -93,6 +93,9 @@ rather than trusted to the model. The nightly re-scoring sweep is not built.
 
 ## WF-05 Outreach Generation
 
+**Built** - see `docs/outreach-generation.md`. The mechanical checks are enforced
+in code and a failed draft is stored verbatim with its reason, never corrected.
+
 | | |
 |---|---|
 | Trigger | Schedule, hourly |

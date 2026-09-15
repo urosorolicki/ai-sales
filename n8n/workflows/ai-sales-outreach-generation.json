@@ -1,0 +1,566 @@
+{
+  "id": "wf05OutreachGen",
+  "name": "AI Sales — WF-05 Outreach Generation",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "n5-trigger",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/prompts/outreach.md",
+        "options": {}
+      },
+      "id": "n5-rp",
+      "name": "Read Outreach Prompt",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -700,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "n5-pt",
+      "name": "Prompt To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/agents/outreach/schema.json",
+        "options": {}
+      },
+      "id": "n5-rs",
+      "name": "Read Outreach Schema",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -700,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "n5-st",
+      "name": "Schema To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claim leads that are ready for a first message, and open their run in the\n-- same statement so the agent_runs row is the claim.\n--\n-- is_suppressed is checked here as well as by the trigger on outreach. The\n-- trigger is the guarantee; this is so a suppressed address never costs a model\n-- call in the first place.\nWITH claimed AS (\n    SELECT l.id\n    FROM leads l\n    JOIN people p    ON p.id = l.person_id\n    JOIN companies c ON c.id = l.company_id\n    WHERE l.status = 'new'\n      AND l.score >= ($1::jsonb ->> 'min_score')::int\n      AND NOT EXISTS (\n          SELECT 1 FROM outreach o WHERE o.lead_id = l.id AND o.sequence_step = 1\n      )\n      AND NOT is_suppressed(p.email)\n      AND NOT EXISTS (\n          SELECT 1 FROM agent_runs r\n          WHERE r.agent_name = 'outreach'\n            AND r.status     = 'running'\n            AND (r.input ->> 'lead_id')::uuid = l.id\n            AND r.started_at > now() - interval '15 minutes'\n      )\n    ORDER BY l.score DESC, l.created_at\n    LIMIT ($1::jsonb ->> 'batch_size')::int\n    FOR UPDATE OF l SKIP LOCKED\n),\nopened AS (\n    INSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\n    SELECT 'outreach', l.company_id,\n           ($1::jsonb -> 'input') || jsonb_build_object('lead_id', l.id),\n           'running', $1::jsonb ->> 'model', now()\n    FROM claimed JOIN leads l ON l.id = claimed.id\n    RETURNING id AS agent_run_id, (input ->> 'lead_id')::uuid AS lead_id\n)\nSELECT o.agent_run_id,\n       l.id AS lead_id,\n       l.score,\n       l.reason AS lead_reason,\n       l.recommended_offer,\n       c.id AS company_id,\n       c.name AS company_name,\n       c.domain::text AS domain,\n       c.industry,\n       c.employee_count,\n       c.description,\n       p.full_name  AS person_name,\n       split_part(p.full_name, ' ', 1) AS person_first_name,\n       p.title      AS person_title,\n       p.email::text AS person_email,\n       COALESCE((\n           SELECT r.output -> 'analysis'\n           FROM agent_runs r\n           WHERE r.company_id = c.id AND r.agent_name = 'research' AND r.status = 'success'\n           ORDER BY r.finished_at DESC NULLS LAST LIMIT 1\n       ), '{}'::jsonb) AS research_analysis,\n       COALESCE((\n           SELECT json_agg(json_build_object(\n                      'signal_type', s.signal_type, 'signal', s.signal,\n                      'source_url', s.source_url, 'confidence', s.confidence)\n                  ORDER BY s.created_at)\n           FROM signals s WHERE s.company_id = c.id\n       ), '[]'::json) AS signals,\n       -- Every URL the research actually found, from both places it lands.\n       -- hook_source must be one of these or the human approving the draft\n       -- cannot check the one claim the message rests on.\n       COALESCE((\n           SELECT json_agg(DISTINCT src)\n           FROM (\n               SELECT jsonb_array_elements_text(\n                          COALESCE(r.output #> '{analysis,sources}', '[]'::jsonb)) AS src\n               FROM agent_runs r\n               WHERE r.company_id = c.id AND r.agent_name = 'research' AND r.status = 'success'\n               UNION\n               SELECT s.source_url FROM signals s\n               WHERE s.company_id = c.id AND s.source_url IS NOT NULL\n           ) u\n           WHERE src IS NOT NULL AND src <> ''\n       ), '[]'::json) AS known_sources\nFROM opened o\nJOIN leads l     ON l.id = o.lead_id\nJOIN people p    ON p.id = l.person_id\nJOIN companies c ON c.id = l.company_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ batch_size: 5, min_score: Number($env.OUTREACH_MIN_SCORE) || 60, model: $env.OLLAMA_OUTREACH_MODEL || $env.OLLAMA_RESEARCH_MODEL || 'qwen9-64k:latest', input: { execution_id: String($execution.id), workflow_id: $workflow.id, stage: 'outreach' } } ) }}"
+        }
+      },
+      "id": "p5-01",
+      "name": "Claim Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Leads at 'new' above OUTREACH_MIN_SCORE, not suppressed, with no step-1 draft yet."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the outreach request. Prompt and schema are read from disk, so\n// prompts/outreach.md and agents/outreach/schema.json stay the single sources\n// of truth.\n\nconst MODEL = $env.OLLAMA_OUTREACH_MODEL || $env.OLLAMA_RESEARCH_MODEL || 'qwen9-64k:latest';\n\nfunction fencedBlockUnder(markdown, heading) {\n  const section = markdown.split(new RegExp('^##\\\\s+' + heading + '\\\\s*$', 'm'))[1];\n  if (!section) throw new Error('prompts/outreach.md: no \"## ' + heading + '\" heading');\n  const fence = section.match(/```[a-z]*\\n([\\s\\S]*?)\\n```/);\n  if (!fence) throw new Error('prompts/outreach.md: no fenced block under \"## ' + heading + '\"');\n  return fence[1].trim();\n}\n\nconst doc = $('Prompt To Text').first().json.data;\nconst systemPrompt = fencedBlockUnder(doc, 'System prompt');\n\n// Structure, subject-line rules and the offer table live outside the fenced\n// system prompt but are part of the instruction. Everything up to the worked\n// example goes with it; the example is left out because a local model copies it.\nconst structureStart = doc.indexOf('## Structure');\nconst exampleStart = doc.indexOf('## Example');\nif (structureStart === -1 || exampleStart === -1) {\n  throw new Error('prompts/outreach.md: could not locate the Structure or Example sections');\n}\nconst guidance = doc.slice(structureStart, exampleStart).trim();\n\nconst schema = JSON.parse($('Schema To Text').first().json.data);\ndelete schema.$schema;\ndelete schema.$id;\ndelete schema.title;\n\nreturn $input.all().map((item) => {\n  const c = item.json;\n  const research = c.research_analysis || {};\n\n  const brief = [\n    'RECIPIENT',\n    'Name: ' + c.person_name,\n    'Title: ' + (c.person_title || 'unknown'),\n    '',\n    'COMPANY',\n    'Name: ' + c.company_name,\n    'Domain: ' + c.domain,\n    'Industry: ' + (c.industry || 'unknown'),\n    'Employees: ' + (c.employee_count === null || c.employee_count === undefined ? 'unknown' : c.employee_count),\n    'Summary: ' + (c.description || 'unknown'),\n    '',\n    'RESEARCH FILE',\n    JSON.stringify({\n      facts: research.facts || [],\n      technology: research.technology || [],\n      hiring_signals: research.hiring_signals || [],\n      pain_signals: research.pain_signals || [],\n      why_now: research.why_now || '',\n      unknown: research.unknown || [],\n    }, null, 1),\n    '',\n    'EVIDENCE ROWS (each source_url is checkable; hook_source must be one of these)',\n    JSON.stringify(c.signals || [], null, 1),\n    '',\n    'SOURCES YOU MAY CITE - hook_source must be exactly one of these strings:',\n    (c.known_sources || []).join('\\n'),\n    '',\n    'SCORING SAID: ' + (c.lead_reason || ''),\n    'OFFER TO USE: ' + (c.recommended_offer || 'infrastructure_audit'),\n    '',\n    'Write the first email. If the research file has no specific, current, sourced',\n    'problem, set \"send\" to false and say why. Sending nothing is an acceptable outcome.',\n  ];\n\n  return {\n    json: {\n      agent_run_id: c.agent_run_id,\n      lead_id: c.lead_id,\n      company_id: c.company_id,\n      company_name: c.company_name,\n      person_name: c.person_name,\n      model: MODEL,\n      llm_request: {\n        model: MODEL,\n        temperature: 0.4,\n        max_tokens: 4000,\n        // Writing is where thinking might have helped, but the qwen models spend\n        // their whole budget on it and the draft never arrives. The hard rules\n        // are explicit enough to follow directly. See docs/ollama.md.\n        reasoning_effort: 'none',\n        messages: [\n          { role: 'system', content: systemPrompt + '\\n\\n' + guidance },\n          { role: 'user', content: brief.join('\\n') },\n        ],\n        response_format: {\n          type: 'json_schema',\n          json_schema: { name: 'outreach', strict: true, schema },\n        },\n      },\n    },\n  };\n});\n"
+      },
+      "id": "c5-02",
+      "name": "Build Outreach Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -60,
+        300
+      ],
+      "notes": "The worked example in prompts/outreach.md is deliberately left out of the prompt: a local model copies it."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://ollama:11434') + '/v1/chat/completions' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "id": "n5-llm",
+      "name": "Outreach Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the draft, then run the mechanical checks.\n//\n// prompts/outreach.md lists rules that are checkable without judgement - a word\n// ceiling, a list of phrases that must never appear, a hook that must be\n// traceable to a source the research actually found. docs/workflows.md names\n// them as WF-05's job. They are enforced here rather than trusted to the model,\n// and a draft that fails one is stored at 'draft' with the reason.\n//\n// Nothing is edited to comply. A blocked draft is a draft a human can read and\n// judge; a quietly corrected one is a draft nobody ever learns from.\n\nconst schema = JSON.parse($('Schema To Text').first().json.data);\nconst claims = $('Claim Leads').all();\nconst requests = $('Build Outreach Request').all();\n\nconst MAX_WORDS = 120;\n\n// Straight from the NEVER WRITE list in prompts/outreach.md.\nconst BANNED = [\n  [/\\bhope (you('| a)?re|this (email )?finds you)\\b/i, 'hope you are doing well'],\n  [/\\bi came across\\b/i, 'I came across your company'],\n  [/\\bwas impressed by\\b/i, 'was impressed by'],\n  [/\\bjust following up\\b/i, 'just following up'],\n  [/\\bcircl(e|ing) back\\b/i, 'circling back'],\n  [/\\btouch(ing)? base\\b/i, 'touching base'],\n  [/\\breach(ing)? out\\b/i, 'reaching out'],\n  [/\\blet me know if you('| wou)?d be interested\\b/i, 'let me know if you would be interested'],\n  [/\\bdoes (that|this) resonate\\b/i, 'does that resonate'],\n  [/\\bcompanies like yours\\b/i, 'companies like yours'],\n  [/\\bsynerg/i, 'synergy'],\n  [/\\bgame[- ]chang/i, 'game-changing'],\n  [/\\bleverage\\b/i, 'leverage'],\n];\nconst CALENDAR = /\\b(calendly\\.com|cal\\.com|savvycal|meetings\\.hubspot|book(ing)? a (call|slot)|my calendar)\\b/i;\nconst EMOJI = /[←-⇿⌀-➿⬀-⯿️\\u{1F000}-\\u{1FAFF}]/u;\n\nfunction words(text) {\n  return String(text).trim().split(/\\s+/).filter(Boolean).length;\n}\n\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const req = requests[i].json;\n  const claim = claims[i].json;\n  const res = $input.all()[i].json ?? {};\n\n  const errors = [];\n  const blocks = [];\n  const notes = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Outreach model request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n    const choice = Array.isArray(res.choices) ? res.choices[0] : null;\n    if (!choice) errors.push('Response contained no choices');\n    else if (choice.finish_reason === 'length') {\n      errors.push('Response hit the token limit and is truncated');\n    } else {\n      raw = (choice.message && choice.message.content) || '';\n      if (!raw.trim()) errors.push('Model returned no text content');\n      else {\n        try { parsed = JSON.parse(raw); } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n  if (parsed !== null && typeof parsed.send !== 'boolean') {\n    errors.push('send must be a boolean, got ' + typeof parsed.send);\n    parsed = null;\n  }\n\n  if (errors.length) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, lead_id: req.lead_id, company_id: req.company_id,\n      company_name: req.company_name, person_name: req.person_name,\n      valid: false, outcome: 'error', errors, blocks: [], notes: [],\n      error_message: 'Outreach validation failed: ' + errors.join('; '),\n      draft: null, raw_response: raw, usage,\n    } });\n    continue;\n  }\n\n  // The agent decided there is nothing worth writing. That is a legitimate\n  // outcome, not a failure - prompts/outreach.md says so in as many words.\n  if (parsed.send === false) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, lead_id: req.lead_id, company_id: req.company_id,\n      company_name: req.company_name, person_name: req.person_name,\n      valid: true, outcome: 'not_sending', errors: [], blocks: [],\n      notes: ['agent declined to write: ' + (parsed.reason_if_not_sending || 'no reason given')],\n      error_message: null, draft: null, model_output: parsed, raw_response: raw, usage,\n    } });\n    continue;\n  }\n\n  // ---- shape of a sending draft -------------------------------------------\n  for (const key of ['subject', 'body', 'hook_fact', 'hook_source', 'cta']) {\n    if (typeof parsed[key] !== 'string' || !parsed[key].trim()) {\n      blocks.push('missing or empty ' + key);\n    }\n  }\n  const offers = schema.properties.offer.enum;\n  if (!offers.includes(parsed.offer)) blocks.push('offer \"' + parsed.offer + '\" is not one of the three');\n  // prompts/outreach.md tells the agent to default to infrastructure_audit for a\n  // first message even when scoring suggested something larger. Disagreeing is\n  // allowed; doing it silently is not.\n  if (claim.recommended_offer && parsed.offer && parsed.offer !== claim.recommended_offer) {\n    notes.push('offer is ' + parsed.offer + '; scoring recommended ' + claim.recommended_offer);\n  }\n\n  const body = String(parsed.body || '');\n  const subject = String(parsed.subject || '');\n\n  // ---- word count ----------------------------------------------------------\n  const actual = words(body);\n  if (actual > MAX_WORDS) blocks.push('body is ' + actual + ' words, the ceiling is ' + MAX_WORDS);\n  if (typeof parsed.word_count === 'number' && Math.abs(parsed.word_count - actual) > 5) {\n    notes.push('model counted ' + parsed.word_count + ' words, the body has ' + actual);\n  }\n\n  // ---- banned phrases ------------------------------------------------------\n  for (const [re, label] of BANNED) {\n    if (re.test(body) || re.test(subject)) blocks.push('banned phrase: \"' + label + '\"');\n  }\n  if (CALENDAR.test(body)) blocks.push('a calendar link or booking ask in a first message');\n  if (EMOJI.test(body) || EMOJI.test(subject)) blocks.push('contains an emoji');\n  const questions = (body.match(/\\?/g) || []).length;\n  if (questions > 1) blocks.push('body asks ' + questions + ' questions; exactly one is allowed');\n  if (questions === 0) notes.push('body contains no question; the call to action may not be an ask');\n\n  // ---- the hook must be checkable in five seconds --------------------------\n  const known = claim.known_sources || [];\n  const hook = String(parsed.hook_source || '').trim();\n  if (hook && !known.includes(hook)) {\n    // A source the research never found cannot be verified by the human who\n    // approves this, which is the entire point of the field.\n    blocks.push('hook_source \"' + hook + '\" is not one of the ' + known.length +\n      ' sources the research actually found');\n  }\n\n  // ---- subject line --------------------------------------------------------\n  const subjectWords = words(subject);\n  if (subjectWords < 4 || subjectWords > 7) {\n    notes.push('subject is ' + subjectWords + ' words; prompts/outreach.md asks for four to seven');\n  }\n  if (claim.person_first_name && new RegExp('\\\\b' + claim.person_first_name + '\\\\b', 'i').test(subject)) {\n    blocks.push('subject contains the recipient first name');\n  }\n\n  const passed = blocks.length === 0;\n  out.push({ json: {\n    agent_run_id: req.agent_run_id, lead_id: req.lead_id, company_id: req.company_id,\n    company_name: req.company_name, person_name: req.person_name,\n    valid: true,\n    outcome: passed ? 'queued' : 'blocked',\n    errors: [], blocks, notes,\n    error_message: null,\n    draft: { subject, body, offer: parsed.offer, hook_fact: parsed.hook_fact,\n             hook_source: hook, cta: parsed.cta, word_count: actual },\n    block_reason: passed ? null : 'Blocked by mechanical checks: ' + blocks.join('; '),\n    model_output: parsed, raw_response: raw, usage,\n  } });\n}\n\nreturn out;\n"
+      },
+      "id": "c5-03",
+      "name": "Validate And Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        300
+      ],
+      "notes": "Word ceiling, banned phrases, calendar links, emoji, one question, and a hook_source that must be a URL the research actually found."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "v5-1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "i5-04",
+      "name": "Usable Response?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "v5-2",
+              "leftValue": "={{ $json.outcome === 'queued' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "i5-05",
+      "name": "Passed Checks?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The draft passed every check. It goes to pending_approval, which is where it\n-- stops: Phase 1-7, nothing leaves that status without a human.\nWITH payload AS (SELECT $1::jsonb AS p),\nins AS (\n    INSERT INTO outreach (lead_id, channel, sequence_step, subject, body, status)\n    SELECT (payload.p ->> 'lead_id')::uuid, 'email', 1,\n           payload.p #>> '{draft,subject}',\n           payload.p #>> '{draft,body}',\n           'pending_approval'\n    FROM payload\n    ON CONFLICT (lead_id, sequence_step) DO UPDATE\n        SET subject = EXCLUDED.subject,\n            body    = EXCLUDED.body,\n            status  = 'pending_approval',\n            rejection_reason = NULL\n    RETURNING id, status\n),\nlead AS (\n    UPDATE leads\n    SET status = 'pending_approval'\n    FROM payload\n    WHERE leads.id = (payload.p ->> 'lead_id')::uuid\n      AND leads.status = 'new'\n    RETURNING id\n)\nSELECT (SELECT id FROM ins)              AS outreach_id,\n       (SELECT status FROM ins)          AS outreach_status,\n       (SELECT count(*) FROM lead)::int  AS leads_moved,\n       $1::jsonb ->> 'agent_run_id'      AS agent_run_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ lead_id: $json.lead_id, agent_run_id: $json.agent_run_id, draft: $json.draft } ) }}"
+        }
+      },
+      "id": "p5-06",
+      "name": "Queue For Approval",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1040,
+        80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Stops at pending_approval. Nothing leaves that status without a human."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Two non-sending outcomes in one statement, told apart by 'outcome'.\n--\n-- 'blocked': a check failed. The draft is stored at 'draft' with the reason so a\n-- human can read what the model actually wrote. It is never edited to comply -\n-- docs/workflows.md: it is never auto-corrected.\n--\n-- 'not_sending': the agent judged there was nothing worth writing. No draft\n-- exists to store. The lead moves to 'nurture' so it leaves the queue instead of\n-- being re-generated every hour.\nWITH payload AS (SELECT $1::jsonb AS p),\nins AS (\n    INSERT INTO outreach (lead_id, channel, sequence_step, subject, body, status, rejection_reason)\n    SELECT (payload.p ->> 'lead_id')::uuid, 'email', 1,\n           payload.p #>> '{draft,subject}',\n           payload.p #>> '{draft,body}',\n           'draft',\n           payload.p ->> 'block_reason'\n    FROM payload\n    WHERE payload.p ->> 'outcome' = 'blocked'\n    ON CONFLICT (lead_id, sequence_step) DO UPDATE\n        SET subject          = EXCLUDED.subject,\n            body             = EXCLUDED.body,\n            status           = 'draft',\n            rejection_reason = EXCLUDED.rejection_reason\n    RETURNING id\n),\nnurtured AS (\n    UPDATE leads\n    SET status = 'nurture'\n    FROM payload\n    WHERE leads.id = (payload.p ->> 'lead_id')::uuid\n      AND payload.p ->> 'outcome' = 'not_sending'\n      AND leads.status = 'new'\n    RETURNING id\n)\nSELECT (SELECT count(*) FROM ins)::int      AS drafts_blocked,\n       (SELECT count(*) FROM nurtured)::int AS leads_nurtured,\n       $1::jsonb ->> 'outcome'              AS outcome,\n       $1::jsonb ->> 'agent_run_id'         AS agent_run_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ lead_id: $json.lead_id, agent_run_id: $json.agent_run_id, outcome: $json.outcome, draft: $json.draft, block_reason: $json.block_reason } ) }}"
+        }
+      },
+      "id": "p5-07",
+      "name": "Store Blocked Or Skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1040,
+        320
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "A blocked draft is kept verbatim for a human to read. It is never edited to comply."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE agent_runs\nSET status        = 'success',\n    output        = $1::jsonb -> 'output',\n    error         = NULL,\n    prompt_tokens = ($1::jsonb #>> '{usage,prompt_tokens}')::int,\n    output_tokens = ($1::jsonb #>> '{usage,completion_tokens}')::int,\n    finished_at   = now()\nWHERE id = ($1::jsonb ->> 'agent_run_id')::uuid\nRETURNING id, company_id, status, duration_ms;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ agent_run_id: $('Validate And Check').item.json.agent_run_id, usage: $('Validate And Check').item.json.usage, output: { outcome: $('Validate And Check').item.json.outcome, blocks: $('Validate And Check').item.json.blocks, notes: $('Validate And Check').item.json.notes, draft: $('Validate And Check').item.json.draft, model_output: $('Validate And Check').item.json.model_output } } ) }}"
+        }
+      },
+      "id": "p5-08",
+      "name": "Close Run Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "company",
+              "value": "={{ $('Validate And Check').item.json.company_name }}",
+              "type": "string"
+            },
+            {
+              "id": "o2",
+              "name": "person",
+              "value": "={{ $('Validate And Check').item.json.person_name }}",
+              "type": "string"
+            },
+            {
+              "id": "o3",
+              "name": "outcome",
+              "value": "={{ $('Validate And Check').item.json.outcome }}",
+              "type": "string"
+            },
+            {
+              "id": "o4",
+              "name": "subject",
+              "value": "={{ $('Validate And Check').item.json.draft ? $('Validate And Check').item.json.draft.subject : '' }}",
+              "type": "string"
+            },
+            {
+              "id": "o5",
+              "name": "word_count",
+              "value": "={{ $('Validate And Check').item.json.draft ? $('Validate And Check').item.json.draft.word_count : 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "o6",
+              "name": "blocks",
+              "value": "={{ $('Validate And Check').item.json.blocks.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "o7",
+              "name": "notes",
+              "value": "={{ $('Validate And Check').item.json.notes.join(' | ') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n5-done",
+      "name": "Outreach Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The model failed or returned something unusable. No draft was written and the\n-- lead stays at 'new', so the next hourly pass tries again.\nUPDATE agent_runs\nSET status      = 'error',\n    error       = COALESCE(NULLIF($1::jsonb ->> 'error', ''), 'Outreach failed with no message'),\n    output      = $1::jsonb -> 'output',\n    finished_at = now()\nWHERE id = ($1::jsonb ->> 'agent_run_id')::uuid\nRETURNING id, company_id, status, error;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ agent_run_id: $json.agent_run_id, error: $json.error_message, output: { errors: $json.errors, raw_response: $json.raw_response } } ) }}"
+        }
+      },
+      "id": "p5-09",
+      "name": "Close Run Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        820,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Read Outreach Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Outreach Prompt": {
+      "main": [
+        [
+          {
+            "node": "Prompt To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prompt To Text": {
+      "main": [
+        [
+          {
+            "node": "Read Outreach Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Outreach Schema": {
+      "main": [
+        [
+          {
+            "node": "Schema To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema To Text": {
+      "main": [
+        [
+          {
+            "node": "Claim Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Leads": {
+      "main": [
+        [
+          {
+            "node": "Build Outreach Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Outreach Request": {
+      "main": [
+        [
+          {
+            "node": "Outreach Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outreach Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate And Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate And Check": {
+      "main": [
+        [
+          {
+            "node": "Usable Response?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Usable Response?": {
+      "main": [
+        [
+          {
+            "node": "Passed Checks?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Close Run Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed Checks?": {
+      "main": [
+        [
+          {
+            "node": "Queue For Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Blocked Or Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue For Approval": {
+      "main": [
+        [
+          {
+            "node": "Close Run Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Blocked Or Skipped": {
+      "main": [
+        [
+          {
+            "node": "Close Run Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Run Success": {
+      "main": [
+        [
+          {
+            "node": "Outreach Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

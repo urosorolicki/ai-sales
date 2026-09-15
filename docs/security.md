@@ -37,9 +37,14 @@ provider errors routinely echo the request headers back.
 |---|---|---|
 | PostgreSQL | `127.0.0.1:5432` | Never |
 | Redis | `127.0.0.1:6379` | Never |
-| Ollama | `127.0.0.1:11434` | Never |
+| Ollama | `*:11434` on the host | Never through Caddy |
 | n8n | `127.0.0.1:5678` | Only through Caddy, with TLS and auth |
 | Caddy | `0.0.0.0:80,443` | Yes, when a domain is configured |
+
+**Ollama runs on the host and binds every interface,** which is how the n8n
+container reaches it and also means the local network can. On a home network
+behind NAT that is usually acceptable; elsewhere bind it to the Docker bridge
+address instead. See `docs/ollama.md`.
 
 **Ollama has no authentication of any kind.** Anyone who can reach port 11434
 can use the model, read what is sent to it, and consume the machine's CPU. It
@@ -157,7 +162,7 @@ written by strangers. Both are untrusted input reaching a model.
 - [ ] A restore has been tested at least once
 - [ ] Own domain and current clients are in `suppression_list`
 - [ ] n8n is not reachable without TLS and authentication
-- [ ] PostgreSQL, Redis and Ollama are on loopback only
+- [ ] PostgreSQL and Redis are on loopback only; Ollama is not reachable from outside the LAN
 - [ ] Daily and per-domain limits are set low
 - [ ] `OUTREACH_PAUSED=true` until a batch has been read by a human
 - [ ] Every outreach template identifies the sender and how to opt out

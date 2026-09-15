@@ -21,7 +21,7 @@ system.
                     +--+--------+--------+--------+
                        |        |        |
         +--------------v-+  +---v----+  +v-----------------+
-        |   PostgreSQL   |  | Redis  |  |  Ollama          |
+        |   PostgreSQL   |  | Redis  |  |  Ollama (on host)|
         | system of      |  | queue, |  |  local model,    |
         | record         |  | cache, |  |  bulk + cheap    |
         |                |  | rate   |  |                  |
@@ -41,7 +41,7 @@ system.
 | **PostgreSQL** | System of record. Every company, person, lead, signal, message and agent run. | Constraints, transactions and generated columns let the database enforce rules the workflows would otherwise have to remember. The suppression trigger is the clearest example. |
 | **n8n** | Orchestrator. Schedules, retries, holds credentials, sequences the steps. | The hard part of this system is scheduling and state, not intelligence. n8n has both, plus a visual audit trail of what ran. It also uses PostgreSQL, so there is one thing to back up. |
 | **Redis** | n8n queue mode, rate-limit counters, short-lived caches. | Required by n8n for queue mode; convenient for per-domain send counters that must not be lost on restart but do not belong in PostgreSQL. |
-| **Ollama** | Local model for high-volume, low-stakes work: reply classification, extraction, deduplication. | Classification runs on every inbound message. Paying per token for that is a running cost with no quality benefit. |
+| **Ollama** | Local model for high-volume, low-stakes work: research triage, reply classification, extraction. | Triage runs on every discovered company and classification on every inbound message. Paying per token for that is a running cost with no quality benefit. It runs **natively on the host, not in a container** - a container on macOS gets no Metal access and would run on the CPU. See `docs/ollama.md`. |
 | **External LLM** | Research, scoring, outreach drafting, conversation. | The steps where being wrong is expensive. This is where quality is worth money. |
 | **Caddy** | TLS termination and reverse proxy. | Automatic certificates, a five-line config, no cron for renewals. |
 | **Playwright** | Rendering pages that need JavaScript (some careers pages and job boards). | Used only where a plain fetch fails. It is not part of the default path. |

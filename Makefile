@@ -78,8 +78,7 @@ shell-n8n: ## Open a shell inside the n8n container
 	@docker exec -it aisales-n8n /bin/sh
 
 pull-model: $(ENV_FILE) ## Pull the local Ollama model named in .env
-	@docker exec aisales-ollama ollama pull \
-	    "$$(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2)"
+	@ollama pull "$$(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2)"
 
 backup: $(ENV_FILE) ## Dump the database to $BACKUP_DIR (encrypted if configured)
 	@./scripts/backup.sh

@@ -106,6 +106,13 @@ services:
 
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+    # Ollama runs natively on the host, not in a container: Docker Desktop on
+    # macOS gives a container no Metal access, so an Ollama container is CPU-only
+    # on a machine with a perfectly good GPU. Mapping the name "ollama" to the
+    # host gateway keeps every URL, credential and default that says
+    # http://ollama:11434 working unchanged. See docs/ollama.md.
+    extra_hosts:
+      - "ollama:host-gateway"
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/workflows:ro
@@ -121,27 +128,6 @@ services:
     networks:
       - backend
       - edge
-
-  ollama:
-    <<: *common
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.5.4}
-    container_name: aisales-ollama
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
-      TZ: ${TZ:-Europe/Belgrade}
-    volumes:
-      - ollama_models:/root/.ollama
-    ports:
-      - "${OLLAMA_BIND_ADDR:-127.0.0.1}:${OLLAMA_BIND_PORT:-11434}:11434"
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks:
-      - backend
 
   caddy:
     <<: *common
@@ -179,6 +165,5 @@ volumes:
   postgres_data:
   redis_data:
   n8n_data:
-  ollama_models:
   caddy_data:
   caddy_config:

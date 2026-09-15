@@ -54,7 +54,7 @@ section "Containers"
 if ! command -v docker >/dev/null 2>&1; then
     fail "docker CLI not found"
 else
-    for c in aisales-postgres aisales-redis aisales-n8n aisales-ollama aisales-caddy; do
+    for c in aisales-postgres aisales-redis aisales-n8n aisales-caddy; do
         check_container "$c"
     done
 fi
@@ -89,15 +89,25 @@ else
 fi
 
 section "Ollama"
-if docker exec aisales-ollama ollama list >/dev/null 2>&1; then
-    models="$(docker exec aisales-ollama ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d '[:space:]')"
+# Ollama runs natively on the host, not in a container: a container on macOS gets
+# no Metal access and would run on the CPU. It is checked over HTTP, and from
+# inside n8n too, because that is the path that actually matters.
+ollama_url="${OLLAMA_BASE_URL:-http://ollama:11434}"
+if curl -fsS --max-time 5 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
+    models="$(curl -fsS --max-time 5 "http://127.0.0.1:11434/api/tags" 2>/dev/null \
+        | tr ',' '\n' | grep -c '"name"' | tr -d '[:space:]')"
     if [[ "${models:-0}" -gt 0 ]]; then
-        ok "reachable, ${models} model(s) pulled"
+        ok "reachable on the host, ${models} model(s) pulled"
     else
         warn "reachable but no models pulled - run 'make pull-model'"
     fi
+    if docker exec aisales-n8n wget -q -O- --timeout=5 "${ollama_url}/api/tags" >/dev/null 2>&1; then
+        ok "reachable from n8n at ${ollama_url}"
+    else
+        fail "n8n cannot reach ${ollama_url} - check the 'ollama:host-gateway' entry in docker-compose.yml"
+    fi
 else
-    fail "not reachable"
+    fail "not reachable on the host - is 'ollama serve' running? (brew services start ollama)"
 fi
 
 section "Disk"

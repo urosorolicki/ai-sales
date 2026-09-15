@@ -65,10 +65,9 @@ A skipped company is parked at `status = 'ignored'` with the reason on its
 | Triage, ambiguous | 5s | free |
 | Full research | seconds | ~2-3c |
 
-Triage is slow because **Ollama runs on CPU**: Docker Desktop on macOS has no
-Metal passthrough, so the M4 Pro GPU is unused. Running Ollama natively on the
-host and pointing `OLLAMA_BASE_URL` at `http://host.docker.internal:11434` would
-speed this up by roughly an order of magnitude, and costs nothing.
+Those numbers were measured with Ollama in a container, on the CPU. It now runs
+natively on the host with Metal, which is several times faster - see
+`docs/ollama.md`.
 
 ## The prompt is read from disk, not embedded
 

@@ -93,7 +93,7 @@ Two things are still missing and must not be forgotten when that happens:
 ## Verifying it
 
 There is no way to test an error workflow from the n8n UI without causing a real
-failure. Break something on purpose - stop the Ollama container, or point the
+failure. Break something on purpose - stop `ollama serve`, or point the
 Postgres credential at a wrong port - run WF-00, then check:
 
 ```sql

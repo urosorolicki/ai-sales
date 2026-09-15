@@ -91,9 +91,10 @@ the export carries only a credential name and id.
 | Postgres account | `postgres` | Open Agent Run, Record Success, Record Failure | Host `postgres`, port `5432`, database and user from `.env` (`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`) |
 | Ollama account | `ollamaApi` | Ollama Chat Model | Base URL `http://ollama:11434` |
 
-Both hostnames are Docker network names on the `backend` network. Ollama is
-bound to `127.0.0.1` on the host and is not proxied by Caddy; it is not
-reachable from outside the machine.
+`postgres` is a Docker network name on the `backend` network. `ollama` is not a
+container: `docker-compose.yml` maps that hostname to the host gateway, because
+Ollama runs natively so that it can use the GPU. See `docs/ollama.md`. It is not
+proxied by Caddy.
 
 The model name is not hardcoded. Both the Test Company node and the Ollama Chat
 Model node read `{{ $env.OLLAMA_MODEL }}`, which `docker-compose.yml` passes

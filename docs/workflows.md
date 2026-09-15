@@ -22,6 +22,22 @@ machine. See `n8n/README.md` for the export and import procedure.
 
 ---
 
+## WF-00 Pipeline Test
+
+The smoke test, not part of the pipeline. Proves n8n -> Ollama -> PostgreSQL
+before anything real is built on top of it. Full detail in
+`docs/pipeline-test.md`.
+
+| | |
+|---|---|
+| Trigger | Manual |
+| Input | One hardcoded fictional company |
+| Output | One `agent_runs` row, on a fixed id so re-running updates rather than duplicates |
+| Guards | Malformed model output fails the run; it is never repaired |
+| Failure | Ollama error and validation error both close the run as `error` and fail the execution |
+
+---
+
 ## WF-01 Lead Discovery
 
 Finds candidate companies. Does not research them.
@@ -138,7 +154,9 @@ Only once quality is demonstrated does this workflow send directly.
 
 ## WF-99 Error Handler
 
-Set as the error workflow on every other workflow.
+Set as the error workflow on every other workflow. **Built** - see
+`docs/error-handling.md`. The Telegram half is not wired up yet, and neither is
+the deduplication that goes with it.
 
 | | |
 |---|---|
@@ -183,8 +201,9 @@ WF-99, WF-100 and WF-101 run beside all of it and depend on nothing.
 Do not build these in numerical order. Build the ones that make the next one
 cheap to get right:
 
-1. WF-99 first. Without it, every other failure is silent.
-2. WF-02 and WF-04 next, driven by companies inserted by hand. This is where
+0. WF-00 first, once, to prove the runtime works. Then leave it alone.
+1. WF-99 next. Without it, every other failure is silent.
+2. WF-02 and WF-04, driven by companies inserted by hand. This is where
    quality is decided, and it costs nothing to iterate on.
 3. WF-05, still with hand-entered companies. Read the drafts. If they are not
    good enough to send yourself, no amount of automation downstream helps.

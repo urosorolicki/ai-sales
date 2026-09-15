@@ -1,0 +1,492 @@
+{
+  "id": "wf00PipelineTest",
+  "name": "AI Sales — Pipeline Test",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f01",
+              "name": "run_id",
+              "value": "a15a1e57-7e57-4000-8000-000000000001",
+              "type": "string"
+            },
+            {
+              "id": "f02",
+              "name": "agent_name",
+              "value": "research",
+              "type": "string"
+            },
+            {
+              "id": "f03",
+              "name": "company_name",
+              "value": "Example SaaS",
+              "type": "string"
+            },
+            {
+              "id": "f04",
+              "name": "domain",
+              "value": "example.com",
+              "type": "string"
+            },
+            {
+              "id": "f05",
+              "name": "industry",
+              "value": "SaaS",
+              "type": "string"
+            },
+            {
+              "id": "f06",
+              "name": "description",
+              "value": "A fictional SaaS company used only for testing the AI Sales Machine pipeline.",
+              "type": "string"
+            },
+            {
+              "id": "f07",
+              "name": "model",
+              "value": "={{ $env.OLLAMA_MODEL || 'llama3.1:8b' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Test Company",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -40,
+        300
+      ],
+      "notes": "Hardcoded fictional test company. run_id is a fixed UUID so repeated runs update one agent_runs row."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Open (or re-open) the agent run for this pipeline test.\n-- The id is a fixed test UUID, so repeated runs of this manual workflow update\n-- one row instead of accumulating duplicates. Per n8n/README.md, the run is\n-- bracketed: 'running' before the model call, terminal status after.\nINSERT INTO agent_runs (id, agent_name, input, status, model, started_at)\nVALUES (\n    ($1::jsonb ->> 'run_id')::uuid,\n    $1::jsonb ->> 'agent_name',\n    $1::jsonb -> 'input',\n    'running',\n    $1::jsonb ->> 'model',\n    now()\n)\nON CONFLICT (id) DO UPDATE SET\n    agent_name  = EXCLUDED.agent_name,\n    input       = EXCLUDED.input,\n    model       = EXCLUDED.model,\n    status      = 'running',\n    error       = NULL,\n    output      = NULL,\n    started_at  = now(),\n    finished_at = NULL\nRETURNING id, agent_name, status, model, started_at;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ run_id: $json.run_id, agent_name: $json.agent_name, model: $json.model, input: { test: 'AI Sales - Pipeline Test', execution_id: String($execution.id), workflow_id: $workflow.id, company_name: $json.company_name, domain: $json.domain, industry: $json.industry, description: $json.description } } ) }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Open Agent Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        180,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Bracketed run: inserts status='running' before the model call."
+    },
+    {
+      "parameters": {
+        "model": "={{ $env.OLLAMA_MODEL || 'llama3.1:8b' }}",
+        "options": {
+          "format": "json",
+          "temperature": 0.2,
+          "numPredict": 1024,
+          "keepAlive": "10m"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        400,
+        500
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "iZbPMscIrJAawH4X",
+          "name": "Ollama account"
+        }
+      },
+      "notes": "Base URL comes from the Ollama credential (http://ollama:11434). Never a public endpoint."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyse the following fictional test company using only the information below.\n\nCompany:     {{ $('Test Company').first().json.company_name }}\nDomain:      {{ $('Test Company').first().json.domain }}\nIndustry:    {{ $('Test Company').first().json.industry }}\nDescription: {{ $('Test Company').first().json.description }}\n\nNo other information is available. There is no website to read, no careers page,\nno public repositories, no engineering blog and no job adverts. Everything not\nstated above is unknown.\n\nReturn the JSON object described in the system message, and nothing else.",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "You are the research agent for the AI Sales Machine, running a pipeline smoke test.\n\nCONTEXT\n\nThe company described in the user message is FICTIONAL. It exists only to test the\nn8n -> Ollama -> PostgreSQL pipeline. It is not a real business and it has no\nreal-world presence of any kind.\n\nABSOLUTE RULES\n\n1. This is a fictional test company. Do not invent real-world facts about it, and\n   do not confuse it with any real company whose name resembles it.\n2. Use ONLY the information supplied in the user message. You have no other source\n   and no web access.\n3. A fact is something stated in the supplied information. Anything you concluded\n   rather than read is an inference and belongs in \"reasonable_inferences\".\n4. Anything you cannot determine from the supplied information stays unknown. Put\n   it in \"unknown\". An honest unknown is the correct answer here, and there will\n   be many of them.\n5. Do not guess the company's technology stack, headcount, customers, funding,\n   revenue or problems. None of that was supplied, so none of it is knowable.\n6. Return strict JSON only. No prose before or after. No markdown code fences. No\n   comments. No trailing commas.\n7. confidence is a number between 0 and 1. Material this thin must produce a low\n   number.\n\nOUTPUT SCHEMA - return exactly these keys and no others:\n\n{\n  \"company_summary\": \"\",\n  \"facts\": [],\n  \"reasonable_inferences\": [],\n  \"unknown\": [],\n  \"technology\": [],\n  \"potential_devops_pain\": [],\n  \"recommended_service\": \"\",\n  \"confidence\": 0\n}\n\nFIELD RULES\n\n- company_summary: string. One or two sentences, built only from the supplied\n  information.\n- facts: array of strings. Each one must be traceable to the supplied information.\n- reasonable_inferences: array of strings. Things you concluded rather than read.\n- unknown: array of strings naming what could not be determined.\n- technology: array of strings. Empty unless the supplied information names a\n  technology. It does not name any, so this should be empty.\n- potential_devops_pain: array of strings. These are inferences, not facts, and\n  may legitimately be empty.\n- recommended_service: string, exactly one of \"infrastructure_audit\",\n  \"devops_improvement_sprint\", \"fractional_devops_sre\", \"none\". Choose \"none\"\n  when the supplied information does not support any of the others.\n- confidence: number between 0 and 1."
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Analyse Company",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Prompt source of truth: prompts/pipeline-test.md. A failure here routes to the error output, not into the success path."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the Ollama response. This node never throws: it classifies the\n// response and lets the IF node route. Malformed output is never repaired -\n// no fence stripping, no key coercion, no defaults filled in.\n\nconst REQUIRED = {\n  company_summary: 'string',\n  facts: 'array',\n  reasonable_inferences: 'array',\n  unknown: 'array',\n  technology: 'array',\n  potential_devops_pain: 'array',\n  recommended_service: 'string',\n  confidence: 'number',\n};\n\n// Matches agents/research/schema.json.\nconst SERVICES = [\n  'infrastructure_audit',\n  'devops_improvement_sprint',\n  'fractional_devops_sre',\n  'none',\n];\n\nconst test = $('Test Company').first().json;\nconst llm = $input.first().json ?? {};\nconst raw = typeof llm.text === 'string' ? llm.text : JSON.stringify(llm);\n\nconst errors = [];\nconst warnings = [];\nlet parsed = null;\n\nif (!raw || raw.trim() === '') {\n  errors.push('Model returned an empty response');\n} else {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (e) {\n    errors.push('Response is not valid JSON: ' + e.message);\n  }\n}\n\nif (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n  errors.push('Response is valid JSON but not a JSON object');\n  parsed = null;\n}\n\nif (parsed !== null) {\n  for (const key of Object.keys(REQUIRED)) {\n    const kind = REQUIRED[key];\n    if (!(key in parsed)) {\n      errors.push('Missing required key: ' + key);\n      continue;\n    }\n    const value = parsed[key];\n    const isArray = Array.isArray(value);\n    const ok = kind === 'array' ? isArray : typeof value === kind && !isArray;\n    if (!ok) {\n      errors.push(\n        'Key ' + key + ' must be ' + kind + ', got ' + (isArray ? 'array' : typeof value),\n      );\n      continue;\n    }\n    if (kind === 'array' && value.some((entry) => typeof entry !== 'string')) {\n      errors.push('Key ' + key + ' must contain only strings');\n    }\n  }\n\n  if (typeof parsed.confidence === 'number') {\n    if (!Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) {\n      errors.push('confidence must be a number between 0 and 1, got ' + parsed.confidence);\n    }\n  }\n\n  // Non-fatal: recorded on the run, does not fail the smoke test.\n  const extra = Object.keys(parsed).filter((key) => !(key in REQUIRED));\n  if (extra.length) {\n    warnings.push('Unexpected keys present: ' + extra.join(', '));\n  }\n  if (typeof parsed.recommended_service === 'string' && !SERVICES.includes(parsed.recommended_service)) {\n    warnings.push('recommended_service \"' + parsed.recommended_service + '\" is outside the agreed enum');\n  }\n}\n\nconst valid = errors.length === 0;\n\nreturn [\n  {\n    json: {\n      run_id: test.run_id,\n      valid,\n      failure_stage: valid ? null : 'validation',\n      errors,\n      warnings,\n      error_message: valid ? null : 'Response validation failed: ' + errors.join('; '),\n      parsed: valid ? parsed : null,\n      raw_response: raw,\n    },\n  },\n];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Validate Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "notes": "Never throws. Never repairs malformed output."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c01",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Valid JSON?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close the agent run as successful. Only reached when the response parsed as\n-- JSON and matched the expected shape.\nUPDATE agent_runs\nSET status      = 'success',\n    output      = $1::jsonb -> 'output',\n    error       = NULL,\n    finished_at = now()\nWHERE id = ($1::jsonb ->> 'run_id')::uuid\nRETURNING id, agent_name, status, started_at, finished_at, duration_ms;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ run_id: $json.run_id, output: { validated: true, warnings: $json.warnings, analysis: $json.parsed, raw_response: $json.raw_response } } ) }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Record Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1120,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s01",
+              "name": "test",
+              "value": "AI Sales — Pipeline Test",
+              "type": "string"
+            },
+            {
+              "id": "s02",
+              "name": "result",
+              "value": "passed",
+              "type": "string"
+            },
+            {
+              "id": "s03",
+              "name": "agent_run_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            },
+            {
+              "id": "s04",
+              "name": "agent_run_status",
+              "value": "={{ $json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "s05",
+              "name": "duration_ms",
+              "value": "={{ $json.duration_ms }}",
+              "type": "number"
+            },
+            {
+              "id": "s06",
+              "name": "company",
+              "value": "={{ $('Test Company').first().json.company_name }}",
+              "type": "string"
+            },
+            {
+              "id": "s07",
+              "name": "model",
+              "value": "={{ $('Test Company').first().json.model }}",
+              "type": "string"
+            },
+            {
+              "id": "s08",
+              "name": "recommended_service",
+              "value": "={{ $('Validate Response').first().json.parsed.recommended_service }}",
+              "type": "string"
+            },
+            {
+              "id": "s09",
+              "name": "confidence",
+              "value": "={{ $('Validate Response').first().json.parsed.confidence }}",
+              "type": "number"
+            },
+            {
+              "id": "s10",
+              "name": "validation_warnings",
+              "value": "={{ $('Validate Response').first().json.warnings.join('; ') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "Pipeline Test Passed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1340,
+        100
+      ],
+      "notes": "n8n -> Ollama -> PostgreSQL proven end to end."
+    },
+    {
+      "parameters": {
+        "jsCode": "// The Ollama call itself failed (unreachable, model missing, timeout).\n// Normalise the error into the same shape the validator produces so both\n// failure paths can share one PostgreSQL node.\n\nconst test = $('Test Company').first().json;\nconst item = $input.first().json ?? {};\n\nconst candidate = item.error ?? item.message ?? 'Ollama call failed with no error message';\nconst message =\n  typeof candidate === 'string'\n    ? candidate\n    : (candidate && typeof candidate.message === 'string')\n      ? candidate.message\n      : JSON.stringify(candidate);\n\nreturn [\n  {\n    json: {\n      run_id: test.run_id,\n      valid: false,\n      failure_stage: 'llm_call',\n      errors: [message],\n      warnings: [],\n      error_message: 'Ollama call failed: ' + message,\n      parsed: null,\n      raw_response: null,\n    },\n  },\n];\n"
+      },
+      "id": "a1000000-0000-4000-8000-00000000000a",
+      "name": "Build LLM Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close the agent run as failed. Reached when Ollama itself failed, or when the\n-- response did not parse / did not match the expected shape. The raw response is\n-- kept so the failure can be explained later. Nothing is repaired.\n-- COALESCE guards agent_runs_error_requires_message, which forbids a NULL error\n-- on an 'error' row.\nUPDATE agent_runs\nSET status      = 'error',\n    error       = COALESCE(NULLIF($1::jsonb ->> 'error', ''), 'Unknown failure'),\n    output      = $1::jsonb -> 'output',\n    finished_at = now()\nWHERE id = ($1::jsonb ->> 'run_id')::uuid\nRETURNING id, agent_name, status, error, started_at, finished_at, duration_ms;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ run_id: $json.run_id, error: $json.error_message, output: { validated: false, failure_stage: $json.failure_stage, errors: $json.errors, warnings: $json.warnings, raw_response: $json.raw_response } } ) }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-00000000000b",
+      "name": "Record Failure",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1120,
+        380
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Shared by both failure paths: Ollama error and validation failure."
+    },
+    {
+      "parameters": {
+        "errorMessage": "=AI Sales — Pipeline Test failed: {{ $json.error }}"
+      },
+      "id": "a1000000-0000-4000-8000-00000000000c",
+      "name": "Fail Execution",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        380
+      ],
+      "notes": "Marks the execution failed in n8n history. The error is not swallowed."
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Test Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Company": {
+      "main": [
+        [
+          {
+            "node": "Open Agent Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Agent Run": {
+      "main": [
+        [
+          {
+            "node": "Analyse Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Analyse Company",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyse Company": {
+      "main": [
+        [
+          {
+            "node": "Validate Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build LLM Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Response": {
+      "main": [
+        [
+          {
+            "node": "Valid JSON?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid JSON?": {
+      "main": [
+        [
+          {
+            "node": "Record Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Success": {
+      "main": [
+        [
+          {
+            "node": "Pipeline Test Passed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build LLM Failure": {
+      "main": [
+        [
+          {
+            "node": "Record Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Failure": {
+      "main": [
+        [
+          {
+            "node": "Fail Execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

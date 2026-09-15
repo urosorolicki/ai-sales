@@ -1,0 +1,177 @@
+{
+  "id": "wf99ErrorHandler",
+  "name": "AI Sales — WF-99 Error Handler",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b9000000-0000-4000-8000-000000000001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        300
+      ],
+      "notes": "Fires when a workflow that names WF-99 as its error workflow fails."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shape the failure for the audit trail and for whatever alerting is wired up\n// later. This node talks to nothing outside the host and never retries the\n// workflow that failed - see the WF-99 row in docs/workflows.md.\n\nconst MAX_MESSAGE = 500;\n\n// Credentials must never reach an alert or the audit trail (docs/security.md).\n// Order matters. The scheme rules (Bearer/Basic/Token) must run before the\n// generic key=value rule: otherwise the generic rule consumes the word \"Bearer\"\n// as if it were the value and leaves the actual token in the message.\nfunction redact(text) {\n  if (typeof text !== 'string') return '';\n  return text\n    .replace(/\\b([a-z][a-z0-9+.-]*):\\/\\/([^:\\s/@]+):([^@\\s]+)@/gi, '$1://$2:***@')\n    .replace(/\\beyJ[A-Za-z0-9._-]{16,}/g, '***jwt***')\n    .replace(/\\b(Bearer|Basic|Token)\\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 ***')\n    .replace(\n      /\\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)(?:(?:Bearer|Basic|Token)\\s+)?(\"?)[^\\s,;\"')]+\\3/gi,\n      '$1$2***',\n    );\n}\n\nfunction clip(text) {\n  return text.length > MAX_MESSAGE ? text.slice(0, MAX_MESSAGE) + ' ... [truncated]' : text;\n}\n\nconst src = $input.first().json ?? {};\nconst execution = src.execution ?? {};\nconst workflow = src.workflow ?? {};\n\n// The stack trace is deliberately dropped. It is in the n8n execution already,\n// and it is the most likely place for a connection string to appear.\nconst message = clip(redact(execution.error?.message ?? 'Workflow failed with no error message'));\nconst failedNode = execution.lastNodeExecuted ?? '';\n\nreturn [\n  {\n    json: {\n      execution_id: execution.id === undefined || execution.id === null ? '' : String(execution.id),\n      execution_url: execution.url ?? '',\n      execution_mode: execution.mode ?? '',\n      retry_of: execution.retryOf ?? null,\n      workflow_id: workflow.id ?? '',\n      workflow_name: workflow.name ?? '',\n      failed_node: failedNode,\n      error_message: message,\n      // What goes into agent_runs.error.\n      error: failedNode ? failedNode + ': ' + message : message,\n      failed_at: new Date().toISOString(),\n    },\n  },\n];\n"
+      },
+      "id": "b9000000-0000-4000-8000-000000000002",
+      "name": "Error Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ],
+      "notes": "Redacts credentials and truncates. Drops the stack trace on purpose."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close any agent_runs row the failed execution left at 'running'.\n-- Workflows record $execution.id in agent_runs.input, which is the only link\n-- between an n8n execution and its audit row.\n--\n-- Zero matched rows is a normal outcome: the workflow may have failed before it\n-- opened a run, or it may not call a model at all. The CTE is wrapped in an\n-- aggregate so this query always returns exactly one summary row, whether or not\n-- anything was closed.\n--\n-- COALESCE guards agent_runs_error_requires_message. Only 'running' rows are\n-- touched, so a run that already reached a terminal status is never overwritten.\nWITH closed AS (\n    UPDATE agent_runs\n    SET status      = 'error',\n        error       = COALESCE(NULLIF($1::jsonb ->> 'error', ''), 'Workflow failed with no error message'),\n        finished_at = now()\n    WHERE status = 'running'\n      AND input ->> 'execution_id' = ($1::jsonb ->> 'execution_id')\n    RETURNING id\n)\nSELECT count(*)::int                      AS runs_closed,\n       COALESCE(json_agg(id), '[]'::json) AS closed_run_ids,\n       $1::jsonb ->> 'execution_id'       AS execution_id,\n       $1::jsonb ->> 'workflow_name'      AS workflow_name\nFROM closed;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ execution_id: $json.execution_id, workflow_name: $json.workflow_name, error: $json.error } ) }}"
+        }
+      },
+      "id": "b9000000-0000-4000-8000-000000000003",
+      "name": "Close Agent Runs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        420,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "A row left at 'running' is how WF-101 spots a workflow that died. This closes it."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e01",
+              "name": "alert",
+              "value": "=WF-99: {{ $('Error Context').first().json.workflow_name }} failed at node \"{{ $('Error Context').first().json.failed_node }}\" — {{ $('Error Context').first().json.error_message }}",
+              "type": "string"
+            },
+            {
+              "id": "e02",
+              "name": "workflow_name",
+              "value": "={{ $('Error Context').first().json.workflow_name }}",
+              "type": "string"
+            },
+            {
+              "id": "e03",
+              "name": "failed_node",
+              "value": "={{ $('Error Context').first().json.failed_node }}",
+              "type": "string"
+            },
+            {
+              "id": "e04",
+              "name": "execution_id",
+              "value": "={{ $('Error Context').first().json.execution_id }}",
+              "type": "string"
+            },
+            {
+              "id": "e05",
+              "name": "execution_url",
+              "value": "={{ $('Error Context').first().json.execution_url }}",
+              "type": "string"
+            },
+            {
+              "id": "e06",
+              "name": "failed_at",
+              "value": "={{ $('Error Context').first().json.failed_at }}",
+              "type": "string"
+            },
+            {
+              "id": "e07",
+              "name": "agent_runs_closed",
+              "value": "={{ $json.runs_closed }}",
+              "type": "number"
+            },
+            {
+              "id": "e08",
+              "name": "closed_run_ids",
+              "value": "={{ JSON.stringify($json.closed_run_ids) }}",
+              "type": "string"
+            },
+            {
+              "id": "e09",
+              "name": "delivery",
+              "value": "not_configured (TELEGRAM_ENABLED=false)",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b9000000-0000-4000-8000-000000000004",
+      "name": "Alert Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        300
+      ],
+      "notes": "Ready-made alert text. Adding Telegram later is one node on the end of this, not a redesign."
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Error Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Context": {
+      "main": [
+        [
+          {
+            "node": "Close Agent Runs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Agent Runs": {
+      "main": [
+        [
+          {
+            "node": "Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

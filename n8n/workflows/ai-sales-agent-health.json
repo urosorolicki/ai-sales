@@ -1,0 +1,294 @@
+{
+  "id": "wf101AgentHealth",
+  "name": "AI Sales — WF-101 Agent Health",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "c1010000-0000-4000-8000-000000000001",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        300
+      ],
+      "notes": "Hourly, per the WF-101 row in docs/workflows.md."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Everything WF-101 judges, in one round trip. Read models first\n-- (docs/workflows.md says workflows query the views, not hand-rolled joins),\n-- then the three facts the views do not cover: stuck runs, queue depth, and\n-- notifications that could not be delivered.\n--\n-- No thresholds are applied here. This node reports; Evaluate Health decides.\n-- Keeping the judgement in one place is what makes it testable.\nWITH params AS (SELECT $1::jsonb AS p),\nstuck AS (\n    SELECT count(*)::int AS stuck_runs,\n           COALESCE(json_agg(json_build_object(\n               'agent',      r.agent_name,\n               'run_id',     r.id,\n               'company_id', r.company_id,\n               'started_at', r.started_at,\n               'minutes',    (EXTRACT(EPOCH FROM (now() - r.started_at)) / 60)::int\n           ) ORDER BY r.started_at), '[]'::json) AS stuck_detail\n    FROM agent_runs r, params\n    WHERE r.status = 'running'\n      AND r.started_at < now() - make_interval(mins => (params.p ->> 'stuck_minutes')::int)\n),\nhealth AS (\n    SELECT COALESCE(json_agg(json_build_object(\n               'agent',           agent_name,\n               'runs_24h',        runs_24h,\n               'succeeded',       succeeded,\n               'failed',          failed,\n               'in_flight',       in_flight,\n               'avg_duration_ms', avg_duration_ms,\n               'last_run_at',     last_run_at\n           ) ORDER BY agent_name), '[]'::json) AS agents\n    FROM v_agent_health\n),\nqueues AS (\n    SELECT\n        (SELECT count(*) FROM companies WHERE status = 'new')::int         AS research_pending,\n        (SELECT min(created_at) FROM companies WHERE status = 'new')       AS research_oldest,\n        (SELECT count(*) FROM companies WHERE status = 'researched')::int  AS scoring_pending,\n        (SELECT min(updated_at) FROM companies WHERE status = 'researched') AS scoring_oldest,\n        (SELECT count(*) FROM leads\n          WHERE status = 'new'\n            AND COALESCE(score, 0) >= (SELECT (p ->> 'min_score')::int FROM params))::int AS outreach_pending,\n        (SELECT min(created_at) FROM leads WHERE status = 'new')           AS outreach_oldest,\n        -- A company parked at 'researching' long after any run could still be\n        -- alive is WF-02 having died without WF-99 closing it.\n        (SELECT count(*) FROM companies\n          WHERE status = 'researching'\n            AND updated_at < now() - make_interval(mins => (SELECT (p ->> 'orphan_minutes')::int FROM params)))::int AS orphaned_researching\n),\noutbox AS (\n    SELECT count(*)::int AS undelivered,\n           count(*) FILTER (\n               WHERE status = 'failed'\n                 AND attempts >= (SELECT (p ->> 'max_attempts')::int FROM params)\n           )::int AS undeliverable\n    FROM notifications, params\n    WHERE status IN ('pending', 'failed')\n)\nSELECT health.agents,\n       stuck.stuck_runs,\n       stuck.stuck_detail,\n       queues.research_pending,\n       queues.research_oldest,\n       queues.scoring_pending,\n       queues.scoring_oldest,\n       queues.outreach_pending,\n       queues.outreach_oldest,\n       queues.orphaned_researching,\n       outbox.undelivered,\n       outbox.undeliverable,\n       now() AS checked_at\nFROM health, stuck, queues, outbox;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ stuck_minutes: Number($env.HEALTH_STUCK_RUN_MINUTES || 15), orphan_minutes: Number($env.HEALTH_ORPHAN_RESEARCH_MINUTES || 120), min_score: Number($env.OUTREACH_MIN_SCORE || 60), max_attempts: Number($env.NOTIFY_MAX_ATTEMPTS || 5) } ) }}"
+        }
+      },
+      "id": "c1010000-0000-4000-8000-000000000002",
+      "name": "Collect Health",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        140,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Reports facts only. Every threshold is applied in Evaluate Health."
+    },
+    {
+      "parameters": {
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://ollama:11434') }}/api/tags",
+        "options": {
+          "timeout": 8000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "c1010000-0000-4000-8000-000000000003",
+      "name": "Check Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        300
+      ],
+      "notes": "continueRegularOutput on purpose: an unreachable Ollama must become an alert, not a failed execution.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the facts into alerts, or into nothing.\n//\n// docs/workflows.md: \"An agent that silently stops running is the failure this\n// exists to catch.\" Silence is not observable on its own - an agent with no runs\n// and no work to do is healthy. So every idleness check is paired with evidence\n// that there WAS work: a queue with something in it, old enough that a run\n// should already have happened.\n//\n// Thresholds are read from the environment with defaults here, so a missing\n// variable degrades to a sensible value instead of to NaN.\n\nfunction num(value, fallback) {\n  const n = Number(value);\n  return Number.isFinite(n) ? n : fallback;\n}\n\nconst ERROR_RATE = num($env.HEALTH_ERROR_RATE_THRESHOLD, 0.25);\nconst MIN_RUNS = num($env.HEALTH_ERROR_RATE_MIN_RUNS, 3);\nconst STALLED_HOURS = num($env.HEALTH_STALLED_QUEUE_HOURS, 6);\nconst STUCK_MINUTES = num($env.HEALTH_STUCK_RUN_MINUTES, 15);\n\nconst facts = $('Collect Health').first().json ?? {};\nconst ollama = $input.first().json ?? {};\n\nconst alerts = [];\nfunction raise(key, priority, title, body, payload) {\n  alerts.push({ dedup_key: key, priority, title, body, payload: payload ?? {} });\n}\n\nfunction ageHours(ts) {\n  if (!ts) return 0;\n  return (Date.now() - new Date(ts).getTime()) / 3600000;\n}\n\n// --- Ollama ---------------------------------------------------------------\n// The HTTP node continues on error, so an unreachable Ollama arrives as an item\n// with an error rather than as a failed execution. That matters: a failed\n// execution would hand this to WF-99 and no health alert would ever be written.\nconst models = Array.isArray(ollama.models) ? ollama.models : null;\nif (models === null) {\n  const reason = ollama.error\n    ? (typeof ollama.error === 'string' ? ollama.error : (ollama.error.message ?? 'request failed'))\n    : 'no model list in response';\n  raise(\n    'agent_health:ollama_unreachable',\n    'immediate',\n    'Ollama unreachable',\n    'Ollama did not answer /api/tags: ' + reason +\n      '\\nEvery agent in the pipeline runs on it, so research, scoring and outreach are all stopped.',\n    { check: 'ollama', reason },\n  );\n} else if (models.length === 0) {\n  raise(\n    'agent_health:ollama_no_models',\n    'immediate',\n    'Ollama has no models',\n    'Ollama answered but reports zero installed models. Nothing can run until one is pulled.',\n    { check: 'ollama', models: 0 },\n  );\n}\n\n// --- Runs stuck at 'running' ----------------------------------------------\nconst stuckRuns = num(facts.stuck_runs, 0);\nif (stuckRuns > 0) {\n  const detail = Array.isArray(facts.stuck_detail) ? facts.stuck_detail : [];\n  const lines = detail.slice(0, 5).map((r) => '- ' + r.agent + ' run ' + r.run_id + ', ' + r.minutes + ' min');\n  raise(\n    'agent_health:stuck_runs',\n    'immediate',\n    stuckRuns + ' agent run(s) stuck',\n    stuckRuns + ' agent_runs row(s) have been at status=running for over ' + STUCK_MINUTES +\n      ' minutes.\\nA run that never closes means the workflow died without WF-99 closing it,' +\n      ' and it holds the claim on its company.\\n' + lines.join('\\n'),\n    { check: 'stuck_runs', count: stuckRuns, detail: detail.slice(0, 20) },\n  );\n}\n\n// --- Error rate per agent --------------------------------------------------\nconst agents = Array.isArray(facts.agents) ? facts.agents : [];\nfor (const a of agents) {\n  const runs = num(a.runs_24h, 0);\n  const failed = num(a.failed, 0);\n  if (runs < MIN_RUNS) continue; // Too few runs for a rate to mean anything.\n  const rate = failed / runs;\n  if (rate > ERROR_RATE) {\n    raise(\n      'agent_health:error_rate:' + a.agent,\n      'immediate',\n      'Agent \"' + a.agent + '\" failing',\n      failed + ' of ' + runs + ' ' + a.agent + ' runs in the last 24h failed (' +\n        Math.round(rate * 100) + '%, threshold ' + Math.round(ERROR_RATE * 100) + '%).' +\n        '\\nLast run: ' + (a.last_run_at ?? 'never'),\n      { check: 'error_rate', agent: a.agent, runs_24h: runs, failed, rate: Number(rate.toFixed(3)) },\n    );\n  }\n}\n\n// --- Work waiting with nobody working on it --------------------------------\nconst byAgent = new Map(agents.map((a) => [a.agent, a]));\nconst stages = [\n  { agent: 'research', pending: num(facts.research_pending, 0), oldest: facts.research_oldest,\n    queue: \"companies at status='new'\" },\n  { agent: 'scoring', pending: num(facts.scoring_pending, 0), oldest: facts.scoring_oldest,\n    queue: \"companies at status='researched'\" },\n  { agent: 'outreach', pending: num(facts.outreach_pending, 0), oldest: facts.outreach_oldest,\n    queue: \"leads at status='new' above OUTREACH_MIN_SCORE\" },\n];\n\nfor (const stage of stages) {\n  if (stage.pending === 0) continue;\n  const waited = ageHours(stage.oldest);\n  if (waited < STALLED_HOURS) continue;\n  const runs = num(byAgent.get(stage.agent)?.runs_24h, 0);\n  if (runs > 0) continue; // It is running; a backlog alone is not a fault.\n  raise(\n    'agent_health:idle_agent:' + stage.agent,\n    'normal',\n    'Agent \"' + stage.agent + '\" has not run',\n    stage.pending + ' item(s) are waiting in ' + stage.queue + ', the oldest for ' +\n      Math.round(waited) + 'h, and the ' + stage.agent + ' agent has not run once in 24 hours.' +\n      '\\nThe usual cause is the workflow not being active in n8n.',\n    { check: 'idle_agent', agent: stage.agent, pending: stage.pending, waited_hours: Math.round(waited) },\n  );\n}\n\n// --- Companies abandoned mid-research --------------------------------------\nconst orphaned = num(facts.orphaned_researching, 0);\nif (orphaned > 0) {\n  raise(\n    'agent_health:orphaned_researching',\n    'normal',\n    orphaned + ' company(ies) stuck researching',\n    orphaned + \" company(ies) have been at status='researching' long enough that no live run\" +\n      ' can still own them. They are claimed and will never be picked up again until the status' +\n      \" is put back to 'new'.\",\n    { check: 'orphaned_researching', count: orphaned },\n  );\n}\n\n// --- The notifier itself ---------------------------------------------------\n// Nothing watches the watcher, which docs/error-handling.md names as a gap.\n// This is the closest honest check: alerts that were queued and never left.\nconst undeliverable = num(facts.undeliverable, 0);\nif (undeliverable > 0) {\n  raise(\n    'agent_health:undeliverable_notifications',\n    'normal',\n    undeliverable + ' notification(s) undeliverable',\n    undeliverable + ' notification(s) hit the delivery attempt limit and will not be retried.' +\n      ' They are still in the notifications table; nothing was lost, but nobody was told.',\n    { check: 'undeliverable', count: undeliverable },\n  );\n}\n\nconst summary = {\n  checked_at: facts.checked_at,\n  ollama_models: models === null ? null : models.length,\n  stuck_runs: stuckRuns,\n  agents_seen: agents.length,\n  research_pending: num(facts.research_pending, 0),\n  scoring_pending: num(facts.scoring_pending, 0),\n  outreach_pending: num(facts.outreach_pending, 0),\n  undelivered_notifications: num(facts.undelivered, 0),\n  alert_count: alerts.length,\n};\n\nif (alerts.length === 0) {\n  return [{ json: { healthy: true, ...summary } }];\n}\n\nreturn alerts.map((a) => ({ json: { healthy: false, ...a, ...summary } }));\n"
+      },
+      "id": "c1010000-0000-4000-8000-000000000004",
+      "name": "Evaluate Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        300
+      ],
+      "notes": "All the judgement lives here. One item per alert, or one item with healthy=true."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "h101-1",
+              "leftValue": "={{ $json.healthy === false }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1010000-0000-4000-8000-000000000005",
+      "name": "Any Alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        860,
+        300
+      ],
+      "notes": "True branch carries one item per alert."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- One alert per item. queue_notification owns the deduplication rule\n-- (0011_notifications.sql): a health problem that is still open is counted,\n-- not re-sent, which is what stops an hourly schedule from sending 24 copies\n-- of the same failure a day.\nSELECT q.notification_id,\n       q.status,\n       q.occurrences,\n       q.deduplicated,\n       $1::jsonb ->> 'dedup_key' AS dedup_key\nFROM queue_notification(\n         'agent_health',\n         $1::jsonb ->> 'dedup_key',\n         $1::jsonb ->> 'title',\n         $1::jsonb ->> 'body',\n         $1::jsonb ->> 'priority',\n         $1::jsonb -> 'payload',\n         NULL,\n         NULL,\n         make_interval(mins => ($1::jsonb ->> 'cooloff_minutes')::int)\n     ) q;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ dedup_key: $json.dedup_key, title: $json.title, body: $json.body, priority: $json.priority, payload: $json.payload, cooloff_minutes: Number($env.HEALTH_ALERT_COOLOFF_MINUTES || 360) } ) }}"
+        }
+      },
+      "id": "c1010000-0000-4000-8000-000000000006",
+      "name": "Queue Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Writes to the outbox. Delivery is WF-10's job and is not this workflow's failure mode."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "h1",
+              "name": "healthy",
+              "value": "={{ true }}",
+              "type": "boolean"
+            },
+            {
+              "id": "h2",
+              "name": "checked_at",
+              "value": "={{ $json.checked_at }}",
+              "type": "string"
+            },
+            {
+              "id": "h3",
+              "name": "ollama_models",
+              "value": "={{ $json.ollama_models }}",
+              "type": "number"
+            },
+            {
+              "id": "h4",
+              "name": "agents_seen",
+              "value": "={{ $json.agents_seen }}",
+              "type": "number"
+            },
+            {
+              "id": "h5",
+              "name": "research_pending",
+              "value": "={{ $json.research_pending }}",
+              "type": "number"
+            },
+            {
+              "id": "h6",
+              "name": "scoring_pending",
+              "value": "={{ $json.scoring_pending }}",
+              "type": "number"
+            },
+            {
+              "id": "h7",
+              "name": "outreach_pending",
+              "value": "={{ $json.outreach_pending }}",
+              "type": "number"
+            },
+            {
+              "id": "h8",
+              "name": "undelivered_notifications",
+              "value": "={{ $json.undelivered_notifications }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1010000-0000-4000-8000-000000000007",
+      "name": "Healthy",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1100,
+        400
+      ],
+      "notes": "Nothing wrong. A quiet health check sends nothing - that is the point of it."
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Collect Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Health": {
+      "main": [
+        [
+          {
+            "node": "Check Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Ollama": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Health": {
+      "main": [
+        [
+          {
+            "node": "Any Alerts?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Alerts?": {
+      "main": [
+        [
+          {
+            "node": "Queue Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Healthy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

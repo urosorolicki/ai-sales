@@ -107,6 +107,16 @@ Details that are there for a reason:
   line in an alert is worse than an unstyled one.
 - **No message id means not delivered.** Including an empty response. The point
   of the workflow is knowing whether the human was actually told.
+- **The failure reason is read off the item, not off `item.json`.** When the
+  Telegram node continues on fail it pushes `{ json: {}, error: error.message }`,
+  so a workflow that only reads `item.json.error` sees an empty object. That is
+  not theoretical: a real `400 Bad Request: chat not found` was recorded as
+  "no evidence the message was sent" until this was fixed.
+- **A hint is appended to the reason, never a replacement for it.** The node
+  keeps only `error.message` and discards the description, so Telegram's
+  "chat not found" arrives as "Bad request - please check your parameters".
+  The original text is stored verbatim and the likely cause is added after a
+  `|`.
 
 ### The bot token
 
@@ -126,6 +136,23 @@ word boundary between the `t` of `bot` and the first digit, so a `\b`-anchored
 pattern matches nothing and the whole token lands in the database.** That was a
 live bug, caught by a redaction test rather than by reading the code, which is
 the same way the equivalent bug in WF-99 was found.
+
+### Every notification fails with "Bad request"
+
+The recipient has never spoken to the bot. A bot cannot open a conversation, so
+`sendMessage` to a chat that has not started it returns `400 Bad Request: chat
+not found` even when the token and the chat id are both correct. Open the bot in
+Telegram and press Start. `docs/telegram.md` has it as a setup step.
+
+The second thing to check is that the n8n container actually has the variables:
+
+```bash
+docker exec aisales-n8n sh -c 'echo $TELEGRAM_ENABLED $TELEGRAM_CHAT_ID'
+```
+
+A variable that is only in `.env` does not reach n8n. It has to be listed in the
+n8n service's `environment:` block in `docker-compose.yml`, and the container has
+to be recreated with `docker compose up -d n8n` rather than restarted.
 
 ## When Telegram is not configured
 

@@ -18,8 +18,16 @@ all four work better from a phone than from a dashboard nobody opens.
    The token deliberately does **not** go into `TELEGRAM_BOT_TOKEN`. An HTTP node
    would put it in the URL of every saved execution; a credential is encrypted by
    n8n and redacted from execution data. `docs/security.md` forbids the first.
-3. Send the bot a message, read the chat id, put it in `TELEGRAM_CHAT_ID`, and
-   set `TELEGRAM_ENABLED=true`. WF-10 claims nothing at all until both are set.
+3. **Press Start in a chat with your own bot**, or send it any message. This is
+   not optional and it is not the same as step 1: a bot cannot open a
+   conversation, so until the recipient has spoken to it first, every send comes
+   back `400 Bad Request: chat not found` no matter how correct the token and
+   the chat id are. Talking to `@userinfobot` to read your id does not count -
+   that is a different bot.
+4. Put the chat id in `TELEGRAM_CHAT_ID` and set `TELEGRAM_ENABLED=true`. WF-10
+   claims nothing at all until both are set.
+5. Recreate the n8n container: `docker compose up -d n8n`. Not `restart` - that
+   reuses the old environment, and the container is where `$env` is read from.
 
 Before the first delivery, look at what is already queued - otherwise the first
 pass sends the entire backlog in one go:

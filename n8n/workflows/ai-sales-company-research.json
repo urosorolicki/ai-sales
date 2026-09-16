@@ -86,9 +86,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Claim a batch of unresearched companies. FOR UPDATE SKIP LOCKED means two\n-- overlapping runs take different rows instead of fighting over the same ones,\n-- which is the pattern n8n/README.md mandates for every queue read.\n--\n-- prior_failures is counted from agent_runs rather than from a column on\n-- companies: the audit trail already knows how many times research failed for\n-- this company, so there is no need for a retry counter and no migration.\nWITH claimed AS (\n    UPDATE companies\n    SET status = 'researching'\n    WHERE id IN (\n        SELECT id FROM companies\n        WHERE status = 'new'\n        ORDER BY created_at\n        LIMIT ($1::jsonb ->> 'batch_size')::int\n        FOR UPDATE SKIP LOCKED\n    )\n    RETURNING id, name, domain, website, industry\n)\nSELECT c.id            AS company_id,\n       c.name,\n       c.domain::text  AS domain,\n       c.website,\n       c.industry,\n       (SELECT count(*) FROM agent_runs r\n         WHERE r.company_id = c.id\n           AND r.agent_name = 'research'\n           AND r.status = 'error')::int AS prior_failures\nFROM claimed c;",
+        "query": "-- Claim a batch of unresearched companies, subject to the per-domain fetch\n-- rate limit. FOR UPDATE SKIP LOCKED means two overlapping runs take different\n-- rows instead of fighting over the same ones, which is the pattern\n-- n8n/README.md mandates for every queue read.\n--\n-- The rate limit is applied at claim time rather than at fetch time, and it is\n-- the reason the pool is read wider than the batch: a company whose domain is\n-- still cooling down is not claimed at all, so it stays at 'new' and the next\n-- pass takes it, and a company behind it in the queue gets the slot instead.\n-- Filtering after claiming would leave rows stranded at 'researching'.\n--\n-- claim_domain_fetch (0012_fetch_throttle.sql) both tests and stamps in one\n-- statement, so two concurrent runs cannot both decide a domain is free. It is\n-- volatile, so the planner evaluates it per row as the LIMIT pulls them: a\n-- domain that is never reached is never stamped.\n--\n-- prior_failures is counted from agent_runs rather than from a column on\n-- companies: the audit trail already knows how many times research failed for\n-- this company, so there is no need for a retry counter and no migration.\nWITH candidates AS (\n    SELECT id, domain\n    FROM companies\n    WHERE status = 'new'\n    ORDER BY created_at\n    LIMIT ($1::jsonb ->> 'candidate_pool')::int\n    FOR UPDATE SKIP LOCKED\n),\nallowed AS (\n    SELECT id\n    FROM candidates\n    WHERE claim_domain_fetch(\n              domain,\n              make_interval(mins => ($1::jsonb ->> 'domain_cooldown_minutes')::int)\n          )\n    LIMIT ($1::jsonb ->> 'batch_size')::int\n),\nclaimed AS (\n    UPDATE companies\n    SET status = 'researching'\n    WHERE id IN (SELECT id FROM allowed)\n    RETURNING id, name, domain, website, industry\n)\nSELECT c.id            AS company_id,\n       c.name,\n       c.domain::text  AS domain,\n       c.website,\n       c.industry,\n       (SELECT count(*) FROM agent_runs r\n         WHERE r.company_id = c.id\n           AND r.agent_name = 'research'\n           AND r.status = 'error')::int AS prior_failures\nFROM claimed c;",
         "options": {
-          "queryReplacement": "={{ JSON.stringify({ batch_size: 5 } ) }}"
+          "queryReplacement": "={{ JSON.stringify({ batch_size: Number($env.RESEARCH_BATCH_SIZE || 5), candidate_pool: Number($env.RESEARCH_CANDIDATE_POOL || 25), domain_cooldown_minutes: Number($env.RESEARCH_DOMAIN_COOLDOWN_MINUTES || 60) } ) }}"
         }
       },
       "id": "p2-01",
@@ -105,7 +105,7 @@
           "name": "Postgres account"
         }
       },
-      "notes": "FOR UPDATE SKIP LOCKED. Two overlapping runs take different companies."
+      "notes": "Claims only companies whose domain is outside its fetch cooldown. A throttled company stays at 'new' and waits for the next pass."
     },
     {
       "parameters": {
@@ -218,6 +218,12 @@
               "responseFormat": "text",
               "outputPropertyName": "data"
             }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": "={{ Number($env.RESEARCH_FETCH_BATCH_SIZE || 1) }}",
+              "batchInterval": "={{ Number($env.RESEARCH_FETCH_BATCH_INTERVAL_MS || 1000) }}"
+            }
           }
         }
       },
@@ -230,7 +236,7 @@
         300
       ],
       "onError": "continueRegularOutput",
-      "notes": "Explicit timeout, per n8n/README.md. A slow careers page must not hold the workflow open."
+      "notes": "One request at a time by default, spaced by RESEARCH_FETCH_BATCH_INTERVAL_MS. domain_fetch_log is the limit between runs; this is the limit inside one."
     },
     {
       "parameters": {

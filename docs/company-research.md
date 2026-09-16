@@ -24,6 +24,36 @@ Every 30 Minutes
                           +-- false -> Close Run Error
 ```
 
+## Per-domain rate limiting
+
+`docs/workflows.md` lists a per-domain fetch rate limit as a guard on WF-02.
+There are two of them, because they solve different problems.
+
+**Inside one run**, the Fetch Page node sends one request at a time with
+`RESEARCH_FETCH_BATCH_INTERVAL_MS` (1000) between them. Split URLs emits one
+company's pages consecutively, so a global interval is in practice a per-domain
+interval.
+
+**Between runs**, nothing in n8n remembers anything, so the limit lives in
+`domain_fetch_log` (`postgres/migrations/0012_fetch_throttle.sql`). A pass every
+30 minutes, a retry loop, and a company that keeps failing back to `new` can
+otherwise hit the same host dozens of times an hour with nothing noticing.
+
+`claim_domain_fetch()` tests and stamps in one statement, so two concurrent runs
+cannot both decide a domain is free. It is applied **at claim time**, not at
+fetch time, which is why `Claim Companies` reads a candidate pool
+(`RESEARCH_CANDIDATE_POOL`, 25) wider than the batch it wants
+(`RESEARCH_BATCH_SIZE`, 5): a company whose domain is still cooling down is never
+claimed, so it stays at `new` and a company behind it in the queue takes the
+slot. Filtering after claiming would strand rows at `researching`.
+
+Being refused is not an error and nothing is logged for it. The company waits
+for the next pass, which is what a rate limit is supposed to do.
+
+Redis would have been the obvious place for this and was not used: n8n has a
+Postgres credential and no Redis one, and "when did we last touch this domain"
+is worth keeping across a restart.
+
 ## Two models, on purpose
 
 The expensive model is only called for companies that survive a free local

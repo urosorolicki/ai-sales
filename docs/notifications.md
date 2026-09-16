@@ -178,17 +178,29 @@ UPDATE notifications SET status = 'suppressed' WHERE dedup_key = '...';
 
 It keeps counting occurrences and never re-opens on its own.
 
+## Verified
+
+Delivery works end to end against a real bot. The check that proved it:
+
+```sql
+SELECT * FROM queue_notification(
+  'system', 'system:telegram_delivery_check',
+  'Telegram delivery check', 'body', 'immediate');
+```
+
+then a WF-10 run, then reading back both sides - Telegram returned a
+`message_id` for `chat.id` matching `TELEGRAM_CHAT_ID`, and the row reached
+`sent` with a `sent_at` and no error. Both halves matter: the row saying `sent`
+without a message id would mean the workflow marked its own homework.
+
+Delete the probe row afterwards.
+
 ## What is not built
 
 - **Commands.** `/approve`, `/reject`, `/status`, `/leads` and the rest of
   `docs/telegram.md` need a Telegram Trigger and the chat id check that goes
   with it. Until then the draft message says so rather than printing a command
   that does nothing.
-- **A verified successful send.** Every branch of WF-10 has been executed
-  against the live stack except the one that requires a real bot token: the
-  unconfigured branch, the claim, the formatting, a failed delivery, the
-  redaction and the retry backoff all ran. The success path has been tested
-  against a synthetic Telegram response only.
 - **Batching.** `draft_ready` is marked `batched` in the priority column but
   WF-10 still sends one message per row. Grouping them is the next thing to do
   if the approval queue ever gets long.

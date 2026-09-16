@@ -54,8 +54,9 @@ Finds candidate companies. Does not research them.
 
 **Built** - see `docs/company-research.md`. Two local models, no API cost: a
 cheap triage pass filters out companies with no engineering evidence, and only
-the survivors reach the larger research model. Playwright and cross-run
-per-domain rate limiting are not implemented.
+the survivors reach the larger research model. Cross-run per-domain rate
+limiting is enforced at claim time through `domain_fetch_log`. Playwright is not
+implemented.
 
 | | |
 |---|---|
@@ -81,11 +82,13 @@ per-domain rate limiting are not implemented.
 
 **Built** - see `docs/lead-scoring.md`. It polls for researched companies rather
 than being called by WF-02, and the rubric's checkable rules are enforced in code
-rather than trusted to the model. The nightly re-scoring sweep is not built.
+rather than trusted to the model. A nightly sweep puts stale scores and companies
+that gained a contact back in the queue, and a company reaching `HOT` queues a
+notification.
 
 | | |
 |---|---|
-| Trigger | Schedule, every 15 minutes (not called by WF-02 - see `docs/lead-scoring.md`) |
+| Trigger | Schedule, every 15 minutes, plus a nightly re-scoring sweep at 03:20 (not called by WF-02 - see `docs/lead-scoring.md`) |
 | Input | A researched company, its `signals`, its `people` |
 | Output | `companies.fit_score`, `research_score`, `decision_maker_score`, `status = 'scored'`; `leads` rows for contactable decision makers |
 | Guards | Never writes `total_score` or `score_band`, which are generated columns. Applies the hard overrides from `docs/scoring.md`. |
@@ -94,7 +97,8 @@ rather than trusted to the model. The nightly re-scoring sweep is not built.
 ## WF-05 Outreach Generation
 
 **Built** - see `docs/outreach-generation.md`. The mechanical checks are enforced
-in code and a failed draft is stored verbatim with its reason, never corrected.
+in code and a failed draft is stored verbatim with its reason, never corrected. A
+queued draft also queues the approval message from `docs/telegram.md`.
 
 | | |
 |---|---|
@@ -155,43 +159,58 @@ later a one-line change rather than a redesign.
 Phase 9 and earlier, replies generated here are queued for human approval too.
 Only once quality is demonstrated does this workflow send directly.
 
-## WF-10 Opportunity + Telegram
+## WF-10 Telegram Dispatch
+
+**Built** - see `docs/notifications.md`. It came out inverted from the sketch
+below: nothing calls it. Workflows write a row to `notifications` and WF-10
+drains that outbox on a schedule, which is what makes "the opportunity stays in
+`v_open_opportunities` regardless" true for every notification rather than just
+for opportunities. The command half, and the WF-08/WF-09 triggers, are not built
+because those workflows do not exist yet.
 
 | | |
 |---|---|
-| Trigger | Called by WF-08 on POSITIVE, by WF-09 on escalation, by WF-04 when a company reaches HOT |
-| Output | Telegram message to `TELEGRAM_CHAT_ID` with the company, the person, the thread and the reason |
-| Guards | Only `TELEGRAM_CHAT_ID` may issue commands back, checked before any command does anything |
-| Failure | Telegram unavailable retries with backoff, then WF-99. The opportunity stays in `v_open_opportunities` regardless, so nothing is lost if the notification is. |
+| Trigger | Schedule, every 5 minutes |
+| Input | The `notifications` outbox: written by WF-04 on HOT, WF-05 on a queued draft, WF-99 on a failure, WF-100 and WF-101 |
+| Output | Telegram message to `TELEGRAM_CHAT_ID`; `notifications.status` to `sent` or `failed` |
+| Guards | Claims nothing unless `TELEGRAM_ENABLED=true` and `TELEGRAM_CHAT_ID` is set. Only `TELEGRAM_CHAT_ID` may issue commands back, checked before any command does anything. |
+| Failure | Retries with a backoff up to `NOTIFY_MAX_ATTEMPTS`, then leaves the row at `failed` and WF-101 reports it. Nothing is deleted, so nothing is lost if the notification is. |
 
 ## WF-99 Error Handler
 
 Set as the error workflow on every other workflow. **Built** - see
-`docs/error-handling.md`. The Telegram half is not wired up yet, and neither is
-the deduplication that goes with it.
+`docs/error-handling.md`. It queues a deduplicated alert into the notifications
+outbox; WF-10 delivers it.
 
 | | |
 |---|---|
 | Trigger | n8n error trigger |
-| Output | `agent_runs` updated to `error` where a row exists; Telegram alert, deduplicated so one broken schedule does not send 96 messages a day |
+| Output | `agent_runs` updated to `error` where a row exists; one deduplicated `notifications` row, so one broken schedule does not send 96 messages a day |
 | Guards | Never retries the failed workflow itself. Alert text must not contain credentials or full message bodies. |
 
 ## WF-100 Daily Report
 
+**Built** - see `docs/notifications.md`.
+
 | | |
 |---|---|
-| Trigger | Schedule, once a day |
+| Trigger | Schedule, daily at 08:00 |
 | Input | `v_daily_stats`, `v_hot_companies`, `v_open_opportunities` |
-| Output | One Telegram message: discovered, researched, scored, awaiting approval, sent, replies, open opportunities, failures |
+| Output | One `notifications` row per day: awaiting approval first, then discovered, signals, leads, sent, replies, failures, the pipeline census, the top companies and the agent summary |
 | Notes | The awaiting-approval count is the number that matters. A growing queue means the human is the bottleneck, which is the intended state early on. |
 
 ## WF-101 Agent Health
 
+**Built** - see `docs/notifications.md`. "An agent that should have run" is not
+observable on its own, so every idleness check is paired with evidence that
+there was work: a queue with something in it, old enough that a run should
+already have happened. An idle agent with an empty queue is healthy.
+
 | | |
 |---|---|
 | Trigger | Schedule, hourly |
-| Input | `v_agent_health`, plus `agent_runs` stuck in `running` for over 15 minutes |
-| Output | Telegram alert on: error rate above threshold, any agent with zero runs in 24h that should have run, stuck runs, Ollama unreachable, external LLM failures |
+| Input | `v_agent_health`, `agent_runs` stuck in `running`, queue depth per stage, companies abandoned at `researching`, undeliverable notifications, and a live check on Ollama |
+| Output | A `notifications` row per problem: error rate above threshold, an agent with work waiting and zero runs in 24h, stuck runs, Ollama unreachable or empty, orphaned companies, notifications that ran out of delivery attempts |
 | Notes | An agent that silently stops running is the failure this exists to catch. |
 
 ## Dependency order
@@ -219,6 +238,8 @@ cheap to get right:
    quality is decided, and it costs nothing to iterate on.
 3. WF-05, still with hand-entered companies. Read the drafts. If they are not
    good enough to send yourself, no amount of automation downstream helps.
-4. WF-10 and WF-100, so there is a feedback loop.
+4. WF-10 and WF-100, so there is a feedback loop. **Done**, along with WF-101.
+   Delivery needs a bot token; until there is one the loop is
+   `SELECT * FROM v_pending_notifications`.
 5. WF-01 and WF-03 only once the pipeline produces drafts worth having.
 6. WF-06, last, and only after a human has approved and read a batch.

@@ -100,11 +100,19 @@ ai-sales-machine/
 │   ├── architecture.md       what it is and why
 │   ├── setup.md              Mac Mini deployment, troubleshooting
 │   ├── security.md           secrets, exposure, GDPR, rate limits
+│   ├── ollama.md             why the models run on the host
 │   ├── workflows.md          all 13 workflows, inputs and outputs
 │   ├── scoring.md            the 100-point rubric
 │   ├── telegram.md           the human control plane
+│   ├── notifications.md      the outbox and its deduplication
 │   ├── opportunity-radar.md  the signal engine (Phase 13)
-│   └── roadmap.md            14 phases
+│   ├── roadmap.md            14 phases
+│   │
+│   ├── pipeline-test.md          WF-00, built
+│   ├── company-research.md       WF-02, built
+│   ├── lead-scoring.md           WF-04, built
+│   ├── outreach-generation.md    WF-05, built
+│   └── error-handling.md         WF-99, built
 │
 └── scripts/
     ├── healthcheck.sh

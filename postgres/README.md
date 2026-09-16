@@ -27,6 +27,8 @@ make migrate-status     # what is applied, what is pending
 | `0008_outreach.sql` | `outreach`, suppression enforcement trigger |
 | `0009_conversations.sql` | `conversations`, `messages` |
 | `0010_views.sql` | read models for Telegram, reports and health |
+| `0011_notifications.sql` | `notifications` outbox, `queue_notification()`, `v_pending_notifications` |
+| `0012_fetch_throttle.sql` | `domain_fetch_log`, `claim_domain_fetch()` |
 
 ### Rules
 
@@ -56,6 +58,13 @@ failed transaction rather than a wrong outcome:
 | `sent` implies `sent_at` | Check constraint |
 | `approved` implies an approver | Check constraint |
 | `error` implies an error message | Check constraint on `agent_runs` |
+| One alert per deduplication identity | Unique index on `notifications(dedup_key)` |
+| One fetch per domain per cooldown | `claim_domain_fetch()`, test and stamp in one statement |
+
+The last two follow the same reasoning as the rest of this table. Deduplicating
+alerts in each workflow would mean five copies of the rule and five chances to
+get it wrong; a unique index means a second row for the same alert cannot be
+written at all. `docs/notifications.md` explains what happens instead.
 
 ## Seeds
 

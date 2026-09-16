@@ -1,0 +1,206 @@
+{
+  "id": "wf100DailyReport",
+  "name": "AI Sales — WF-100 Daily Report",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "Every Morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        300
+      ],
+      "notes": "08:00 in GENERIC_TIMEZONE. Once a day, per the WF-100 row in docs/workflows.md."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- One row, everything the report needs. The three views named in the WF-100\n-- row of docs/workflows.md, plus the pipeline census that explains the numbers\n-- in them: \"0 sent\" means something different when 40 companies are waiting to\n-- be researched than when the database is empty.\nWITH stats AS (SELECT * FROM v_daily_stats),\nhot AS (\n    SELECT COALESCE(json_agg(json_build_object(\n               'name',        name,\n               'domain',      domain,\n               'total_score', total_score,\n               'score_band',  score_band,\n               'status',      status,\n               'people',      people_count\n           ) ORDER BY total_score DESC), '[]'::json) AS rows,\n           count(*)::int AS total\n    FROM (SELECT * FROM v_hot_companies LIMIT 5) h\n),\nopportunities AS (\n    SELECT COALESCE(json_agg(json_build_object(\n               'company', company_name,\n               'person',  full_name,\n               'reason',  escalation_reason,\n               'status',  status\n           )), '[]'::json) AS rows\n    FROM (SELECT * FROM v_open_opportunities LIMIT 5) o\n),\npipeline AS (\n    SELECT COALESCE(json_object_agg(status, n), '{}'::json) AS by_status\n    FROM (SELECT status, count(*)::int AS n FROM companies GROUP BY status) s\n),\nagents AS (\n    SELECT COALESCE(json_agg(json_build_object(\n               'agent', agent_name, 'runs', runs_24h,\n               'ok', succeeded, 'failed', failed,\n               'avg_ms', avg_duration_ms\n           ) ORDER BY agent_name), '[]'::json) AS rows\n    FROM v_agent_health\n),\ntotals AS (\n    SELECT (SELECT count(*) FROM companies)::int AS companies_total,\n           (SELECT count(*) FROM leads)::int     AS leads_total,\n           (SELECT count(*) FROM people)::int    AS people_total,\n           (SELECT count(*) FROM signals)::int   AS signals_total\n)\nSELECT to_json(stats)      AS stats,\n       hot.rows            AS hot_companies,\n       hot.total           AS hot_count,\n       opportunities.rows  AS opportunities,\n       pipeline.by_status  AS pipeline,\n       agents.rows         AS agents,\n       to_json(totals)     AS totals,\n       (now() AT TIME ZONE COALESCE(NULLIF($1::jsonb ->> 'timezone', ''), 'UTC'))::date::text AS report_date\nFROM stats, hot, opportunities, pipeline, agents, totals;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ timezone: $env.GENERIC_TIMEZONE || 'UTC' } ) }}"
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "Read Daily Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        160,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Reads the three views WF-100 is specified against, plus the census that gives them context."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the daily message.\n//\n// docs/workflows.md on WF-100: \"The awaiting-approval count is the number that\n// matters. A growing queue means the human is the bottleneck, which is the\n// intended state early on.\" So it goes first, and it is never buried in a list.\n//\n// This node formats. It decides nothing and hides nothing: if the pipeline did\n// nothing yesterday, the report says so in one line rather than going quiet.\n\nconst f = $input.first().json ?? {};\nconst stats = f.stats ?? {};\nconst totals = f.totals ?? {};\nconst pipeline = f.pipeline ?? {};\nconst hot = Array.isArray(f.hot_companies) ? f.hot_companies : [];\nconst opps = Array.isArray(f.opportunities) ? f.opportunities : [];\nconst agents = Array.isArray(f.agents) ? f.agents : [];\n\nfunction n(v) {\n  const x = Number(v);\n  return Number.isFinite(x) ? x : 0;\n}\n\nconst awaiting = n(stats.awaiting_approval);\nconst lines = [];\n\nlines.push('Awaiting your approval: ' + awaiting);\nif (awaiting === 0) {\n  lines.push('  Nothing to read. Either nothing scored high enough, or no drafts were generated.');\n}\nlines.push('');\n\nlines.push('Last 24 hours');\nlines.push('  discovered  ' + n(stats.companies_discovered));\nlines.push('  signals     ' + n(stats.signals_captured));\nlines.push('  leads       ' + n(stats.leads_created));\nlines.push('  sent        ' + n(stats.messages_sent));\nlines.push('  replies     ' + n(stats.replies_received));\nlines.push('  failures    ' + n(stats.agent_failures));\n\nconst active = Object.entries(pipeline)\n  .filter(([, v]) => n(v) > 0)\n  .sort((a, b) => n(b[1]) - n(a[1]));\nlines.push('');\nlines.push('Pipeline (' + n(totals.companies_total) + ' companies, ' +\n           n(totals.people_total) + ' people, ' + n(totals.leads_total) + ' leads)');\nif (active.length === 0) {\n  lines.push('  empty');\n} else {\n  for (const [status, count] of active) lines.push('  ' + status.padEnd(12) + n(count));\n}\n\nif (hot.length > 0) {\n  lines.push('');\n  lines.push('Top companies');\n  for (const c of hot) {\n    lines.push('  ' + c.total_score + '  ' + c.name + ' (' + c.domain + ') ' +\n               c.score_band + (n(c.people) === 0 ? ' — no contact yet' : ''));\n  }\n}\n\nif (n(stats.open_opportunities) > 0) {\n  lines.push('');\n  lines.push('Open opportunities: ' + n(stats.open_opportunities));\n  for (const o of opps) {\n    lines.push('  ' + o.company + ' — ' + o.person + ' (' + o.status +\n               (o.reason ? ': ' + o.reason : '') + ')');\n  }\n}\n\nif (agents.length > 0) {\n  lines.push('');\n  lines.push('Agents (24h)');\n  for (const a of agents) {\n    const avg = a.avg_ms === null || a.avg_ms === undefined\n      ? '' : ', avg ' + Math.round(n(a.avg_ms) / 1000) + 's';\n    lines.push('  ' + a.agent + ': ' + n(a.runs) + ' runs, ' + n(a.failed) + ' failed' + avg);\n  }\n} else {\n  lines.push('');\n  lines.push('Agents (24h): no runs at all. Either nothing was queued, or no workflow is active.');\n}\n\nconst date = f.report_date ?? new Date().toISOString().slice(0, 10);\n\nreturn [{\n  json: {\n    report_date: date,\n    // One row per day. Re-running the report on the same day folds into that\n    // row instead of sending a second copy, which is the idempotency rule in\n    // docs/workflows.md.\n    dedup_key: 'daily_report:' + date,\n    title: 'Daily report ' + date,\n    body: lines.join('\\n'),\n    awaiting_approval: awaiting,\n    payload: {\n      stats,\n      totals,\n      pipeline,\n      hot_companies: hot,\n      agents,\n    },\n  },\n}];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "Compose Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ],
+      "notes": "Formatting only. Awaiting-approval goes first because it is the number that matters."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- dedup_key carries the date, so today's report is one row no matter how many\n-- times the schedule fires. The cooloff never comes into play here; it is left\n-- at a day so that a manual re-run inside the same day is folded rather than\n-- re-sent.\nSELECT q.notification_id,\n       q.status,\n       q.occurrences,\n       q.deduplicated,\n       $1::jsonb ->> 'dedup_key' AS dedup_key\nFROM queue_notification(\n         'daily_report',\n         $1::jsonb ->> 'dedup_key',\n         $1::jsonb ->> 'title',\n         $1::jsonb ->> 'body',\n         'batched',\n         $1::jsonb -> 'payload',\n         NULL,\n         NULL,\n         interval '1 day'\n     ) q;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ dedup_key: $json.dedup_key, title: $json.title, body: $json.body, payload: $json.payload } ) }}"
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Queue Report",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        680,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Into the outbox. The report exists whether or not Telegram is configured."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "report_date",
+              "value": "={{ $('Compose Report').first().json.report_date }}",
+              "type": "string"
+            },
+            {
+              "id": "r2",
+              "name": "awaiting_approval",
+              "value": "={{ $('Compose Report').first().json.awaiting_approval }}",
+              "type": "number"
+            },
+            {
+              "id": "r3",
+              "name": "notification_id",
+              "value": "={{ $json.notification_id }}",
+              "type": "string"
+            },
+            {
+              "id": "r4",
+              "name": "notification_status",
+              "value": "={{ $json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "r5",
+              "name": "already_reported_today",
+              "value": "={{ $json.deduplicated }}",
+              "type": "boolean"
+            },
+            {
+              "id": "r6",
+              "name": "body",
+              "value": "={{ $('Compose Report').first().json.body }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000005",
+      "name": "Report Queued",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        940,
+        300
+      ],
+      "notes": "The rendered report, so a manual run shows it without opening the database."
+    }
+  ],
+  "connections": {
+    "Every Morning": {
+      "main": [
+        [
+          {
+            "node": "Read Daily Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Daily Stats": {
+      "main": [
+        [
+          {
+            "node": "Compose Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Report": {
+      "main": [
+        [
+          {
+            "node": "Queue Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Report": {
+      "main": [
+        [
+          {
+            "node": "Report Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

@@ -12,6 +12,7 @@ retries and state - which n8n already solves - not agent autonomy.
 |---|---|---|---|---|
 | research | `prompts/research.md` | WF-02 | Ollama (`OLLAMA_RESEARCH_MODEL`) | `companies`, `signals` |
 | scoring | `prompts/scoring.md` | WF-04 | Ollama (`OLLAMA_SCORING_MODEL`) | `companies.*_score`, `leads` |
+| enrichment | `prompts/enrichment.md` | WF-03 | Ollama (`OLLAMA_ENRICHMENT_MODEL`) | `people` |
 | outreach | `prompts/outreach.md` | WF-05 | Ollama (`OLLAMA_OUTREACH_MODEL`) | `outreach` (draft) |
 | classifier | `prompts/classifier.md` | WF-08 | Ollama, escalating to external LLM | `messages.classification`, `suppression_list` |
 | triage | inline in WF-02 | WF-02 | Ollama | `agent_runs` only |

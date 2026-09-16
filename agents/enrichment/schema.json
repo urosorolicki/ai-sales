@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-sales-machine/agents/enrichment/schema.json",
+  "title": "Enrichment agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["people", "role_addresses", "notes"],
+  "properties": {
+    "people": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["full_name", "title", "email", "source"],
+        "properties": {
+          "full_name": { "type": "string", "minLength": 2, "maxLength": 120 },
+          "title": { "type": ["string", "null"], "maxLength": 120 },
+          "seniority": {
+            "type": ["string", "null"],
+            "enum": [
+              "c_level", "vp", "head", "director", "manager",
+              "lead", "senior", "individual_contributor", "unknown", null
+            ]
+          },
+          "email": { "type": ["string", "null"] },
+          "linkedin_url": { "type": ["string", "null"] },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "role_addresses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["email", "source"],
+        "properties": {
+          "email": { "type": "string" },
+          "purpose": { "type": ["string", "null"], "maxLength": 120 },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": "string", "maxLength": 600 }
+  }
+}

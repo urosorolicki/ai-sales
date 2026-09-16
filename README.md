@@ -110,6 +110,7 @@ ai-sales-machine/
 │   │
 │   ├── pipeline-test.md          WF-00, built
 │   ├── company-research.md       WF-02, built
+│   ├── contact-enrichment.md     WF-03, built
 │   ├── lead-scoring.md           WF-04, built
 │   ├── outreach-generation.md    WF-05, built
 │   └── error-handling.md         WF-99, built

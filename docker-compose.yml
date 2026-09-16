@@ -118,6 +118,7 @@ services:
       OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen9-64k:latest}
       OLLAMA_SCORING_MODEL: ${OLLAMA_SCORING_MODEL:-qwen9-64k:latest}
       OLLAMA_OUTREACH_MODEL: ${OLLAMA_OUTREACH_MODEL:-qwen9-64k:latest}
+      OLLAMA_ENRICHMENT_MODEL: ${OLLAMA_ENRICHMENT_MODEL:-llama3.1:8b}
 
       # Telegram. TELEGRAM_BOT_TOKEN is deliberately absent: WF-10 sends through
       # the n8n Telegram credential, so the token never becomes an environment
@@ -147,6 +148,11 @@ services:
       RESEARCH_DOMAIN_COOLDOWN_MINUTES: ${RESEARCH_DOMAIN_COOLDOWN_MINUTES:-60}
       RESEARCH_FETCH_BATCH_SIZE: ${RESEARCH_FETCH_BATCH_SIZE:-1}
       RESEARCH_FETCH_BATCH_INTERVAL_MS: ${RESEARCH_FETCH_BATCH_INTERVAL_MS:-1000}
+
+      # Contact enrichment (WF-03).
+      ENRICH_BATCH_SIZE: ${ENRICH_BATCH_SIZE:-3}
+      ENRICH_CANDIDATE_POOL: ${ENRICH_CANDIDATE_POOL:-15}
+      ENRICH_RETRY_DAYS: ${ENRICH_RETRY_DAYS:-30}
 
       # Scoring and outreach.
       RESCORE_AFTER_DAYS: ${RESCORE_AFTER_DAYS:-7}

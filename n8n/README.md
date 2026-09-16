@@ -27,23 +27,42 @@ definitions and parameters but **not credential values**, only credential
 references by name and id. That is what makes them safe to commit, and it is
 worth verifying after the first export rather than assuming.
 
-Export everything:
+Import on a new machine, or after editing the JSON by hand:
 
 ```bash
-docker exec aisales-n8n n8n export:workflow --all --pretty \
-    --output=/workflows/
+docker exec aisales-n8n n8n import:workflow --separate --input=/workflows
 ```
 
-Import on a new machine:
+`--separate` is required even for a directory of single-object files. Without it
+the import fails with `workflows.map is not a function`.
+
+Export everything. `./n8n/workflows` is mounted **read-only** at `/workflows`, so
+an export cannot write there and has to come back out through `docker cp`:
 
 ```bash
-docker exec aisales-n8n n8n import:workflow --separate --input=/workflows/
+docker exec aisales-n8n n8n export:workflow --all --pretty --output=/tmp/export
+docker cp aisales-n8n:/tmp/export/. ./n8n/workflows/
+docker exec -u root aisales-n8n rm -rf /tmp/export
 ```
 
-`./n8n/workflows` is mounted read-only at `/workflows` inside the container, so
-an export writes directly into the repository. Credentials are re-entered by
-hand on a new machine, or restored with the database and the matching
-encryption key.
+Read-only is the right way round: the JSON in git is the source of truth and the
+n8n database is the copy, so a change made in the UI has to be exported
+deliberately rather than by accident.
+
+Credentials are re-entered by hand on a new machine, or restored with the
+database and the matching encryption key.
+
+Validate before importing:
+
+```bash
+python3 infra/scripts/validate-workflows.py     # also part of make validate
+```
+
+It reads the JSON only and catches the failures n8n does not report until a
+workflow runs: a connection pointing at a renamed node, a node left unreachable,
+a Postgres node with a `$1` placeholder and nothing to fill it, an `errorWorkflow`
+naming a workflow that is not here, and anything that looks like a credential in
+the file.
 
 Run `make secrets-scan` after every export. It is cheap, and an export that
 picked something up is exactly the kind of thing that is noticed six months
@@ -83,6 +102,31 @@ before the model call; update it to a terminal status after. A row left at
 **Idempotency.** Re-running a workflow must not duplicate a row or resend a
 message. The unique indexes on `signals`, `outreach` and `messages` are there to
 make that a database guarantee rather than a workflow discipline.
+
+## Running one by hand
+
+A workflow with a Manual Trigger runs from the CLI:
+
+```bash
+docker exec -e N8N_RUNNERS_ENABLED=false aisales-n8n n8n execute --id=wf00PipelineTest
+```
+
+`N8N_RUNNERS_ENABLED=false` is not optional. The task runner registers with the
+main process, and a separate CLI process has none, so the execution hangs
+forever without it.
+
+**A schedule-triggered workflow cannot be started this way** - `n8n execute`
+answers "Missing node to start execution". Either click **Test workflow** in the
+UI, or import a copy whose trigger is swapped for a Manual Trigger, run that by
+id, and delete it afterwards:
+
+```sql
+DELETE FROM n8n.execution_entity WHERE "workflowId" LIKE 'tmpExec%';
+DELETE FROM n8n.workflow_entity  WHERE id LIKE 'tmpExec%';
+```
+
+Import is not execution. A workflow that imported cleanly has proved nothing
+except that its JSON parses.
 
 ## Execution data
 

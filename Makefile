@@ -48,6 +48,8 @@ validate: ## Validate compose syntax and shell scripts without starting anything
 	@tmp=$$(mktemp); 	 sed -e 's/^POSTGRES_PASSWORD=$$/POSTGRES_PASSWORD=validate/' 	     -e 's/^REDIS_PASSWORD=$$/REDIS_PASSWORD=validate/' 	     -e 's/^N8N_ENCRYPTION_KEY=$$/N8N_ENCRYPTION_KEY=validate/' 	     -e 's/^N8N_BASIC_AUTH_PASSWORD=$$/N8N_BASIC_AUTH_PASSWORD=validate/' 	     .env.example > $$tmp; 	 $(COMPOSE) --env-file $$tmp config -q && echo "    compose OK"; 	 rc=$$?; rm -f $$tmp; exit $$rc
 	@echo "==> shell scripts"
 	@for f in scripts/*.sh infra/scripts/*.sh; do bash -n "$$f" && echo "    $$f OK"; done
+	@echo "==> n8n workflows"
+	@python3 infra/scripts/validate-workflows.py
 
 health: ## Run the full stack health check
 	@./scripts/healthcheck.sh

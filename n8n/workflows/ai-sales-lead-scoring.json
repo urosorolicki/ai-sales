@@ -334,6 +334,148 @@
         }
       },
       "notes": "The company stays at 'researched' and the next pass retries it."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "s4-hot",
+              "leftValue": "={{ $('Write Scores').item.json.score_band === 'HOT' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0400000-0000-4000-8000-000000000001",
+      "name": "Reached HOT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1700,
+        460
+      ],
+      "notes": "Reads the stored band, not the model's arithmetic. docs/scoring.md: the database value stands."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- docs/telegram.md lists \"Company reaches HOT\" as an immediate notification.\n-- The band is read from the database, not from the model: score_band is a\n-- generated column, so this fires on the score that was actually stored.\n--\n-- dedup_key is the company, with a long cooloff. A company that is re-scored\n-- every night and stays HOT is not news twice.\nWITH c AS (\n    SELECT id, name, domain::text AS domain, total_score, score_band, status\n    FROM companies\n    WHERE id = ($1::jsonb ->> 'company_id')::uuid\n      AND score_band = 'HOT'\n),\ndetail AS (\n    SELECT c.*,\n           COALESCE((\n               SELECT string_agg('- ' || s.signal ||\n                                 COALESCE(' (' || s.source_url || ')', ''), E'\\n'\n                                 ORDER BY s.confidence DESC, s.created_at)\n               FROM (SELECT * FROM signals WHERE company_id = c.id\n                     ORDER BY confidence DESC, created_at LIMIT 5) s\n           ), '(no signals on file)') AS signal_lines,\n           (SELECT count(*) FROM people p WHERE p.company_id = c.id)::int AS people_count\n    FROM c\n)\nSELECT q.notification_id, q.status, q.occurrences, q.deduplicated, detail.name, detail.total_score\nFROM detail\nCROSS JOIN LATERAL queue_notification(\n    'company_hot',\n    'company_hot:' || detail.id,\n    'HOT: ' || detail.name || ' (' || detail.total_score || ')',\n    detail.name || ' (' || detail.domain || ') scored ' || detail.total_score || ', band HOT.'\n        || E'\\n\\nWhat got it there:\\n' || detail.signal_lines\n        || E'\\n\\n' || CASE WHEN detail.people_count = 0\n                           THEN 'No contact on file yet, so no lead exists. WF-03 has to find one before anything can be sent.'\n                           ELSE detail.people_count || ' contact(s) on file.' END,\n    'immediate',\n    jsonb_build_object('total_score', detail.total_score, 'score_band', detail.score_band,\n                       'domain', detail.domain, 'people_count', detail.people_count),\n    detail.id,\n    NULL,\n    make_interval(days => ($1::jsonb ->> 'cooloff_days')::int)\n) q;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $('Validate And Guard').item.json.company_id, cooloff_days: Number($env.HOT_ALERT_COOLOFF_DAYS || 30) } ) }}"
+        }
+      },
+      "id": "c0400000-0000-4000-8000-000000000002",
+      "name": "Queue Hot Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1940,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Immediate priority. Delivered by WF-10; queued whether or not Telegram is configured."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 3,
+              "triggerAtMinute": 20
+            }
+          ]
+        }
+      },
+      "id": "c0400000-0000-4000-8000-000000000003",
+      "name": "Nightly Sweep",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        640
+      ],
+      "notes": "03:20, away from the hourly and quarter-hourly schedules."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The nightly re-scoring sweep.\n--\n-- Scoring is not a one-off verdict. Two things make an old score wrong: a\n-- contact appearing (WF-03 fills people, and decision_maker_score is a property\n-- of that table, not a judgement - see docs/lead-scoring.md), and simple age.\n--\n-- This workflow does not re-score anything itself. It puts companies back to\n-- 'researched' and the 15 minute pass above picks them up, so there is exactly\n-- one scoring path and no second copy of the guards to keep in step.\n--\n-- IGNORE companies are left alone unless somebody was added to them. Re-scoring\n-- a company that was capped to IGNORE spends a model call to reach the same\n-- answer; a new contact is the one thing that can change it.\nWITH candidates AS (\n    SELECT c.id,\n           c.score_band,\n           COALESCE(ls.last_scored_at, c.updated_at) AS scored_at,\n           (SELECT max(p.created_at) FROM people p WHERE p.company_id = c.id) AS newest_person_at\n    FROM companies c\n    LEFT JOIN LATERAL (\n        SELECT max(r.finished_at) AS last_scored_at\n        FROM agent_runs r\n        WHERE r.company_id = c.id\n          AND r.agent_name = 'scoring'\n          AND r.status     = 'success'\n    ) ls ON true\n    WHERE c.status = 'scored'\n),\nstale AS (\n    SELECT id\n    FROM candidates\n    WHERE (newest_person_at IS NOT NULL AND newest_person_at > scored_at)\n       OR (score_band <> 'IGNORE'\n           AND scored_at < now() - make_interval(days => ($1::jsonb ->> 'max_age_days')::int))\n    ORDER BY scored_at\n    LIMIT ($1::jsonb ->> 'batch_size')::int\n),\nrequeued AS (\n    UPDATE companies\n    SET status = 'researched'\n    WHERE id IN (SELECT id FROM stale)\n      -- Re-checked here so two overlapping sweeps cannot both requeue a row.\n      AND status = 'scored'\n    RETURNING id, name, domain::text AS domain, total_score, score_band\n)\nSELECT count(*)::int AS requeued,\n       COALESCE(json_agg(json_build_object(\n           'company_id', id, 'name', name, 'domain', domain,\n           'previous_score', total_score, 'previous_band', score_band\n       ) ORDER BY name), '[]'::json) AS companies\nFROM requeued;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ max_age_days: Number($env.RESCORE_AFTER_DAYS || 7), batch_size: Number($env.RESCORE_BATCH_SIZE || 50) } ) }}"
+        }
+      },
+      "id": "c0400000-0000-4000-8000-000000000004",
+      "name": "Requeue Stale Scores",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        200,
+        640
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Moves companies back to 'researched'. The 15 minute pass does the actual re-scoring."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "sw1",
+              "name": "requeued",
+              "value": "={{ $json.requeued }}",
+              "type": "number"
+            },
+            {
+              "id": "sw2",
+              "name": "companies",
+              "value": "={{ JSON.stringify($json.companies) }}",
+              "type": "string"
+            },
+            {
+              "id": "sw3",
+              "name": "note",
+              "value": "Requeued companies are re-scored by the 15 minute pass, not here.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c0400000-0000-4000-8000-000000000005",
+      "name": "Sweep Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        520,
+        640
+      ],
+      "notes": "Zero requeued is the normal outcome on most nights."
     }
   ],
   "connections": {
@@ -470,6 +612,45 @@
         [
           {
             "node": "Scored",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Reached HOT?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reached HOT?": {
+      "main": [
+        [
+          {
+            "node": "Queue Hot Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Nightly Sweep": {
+      "main": [
+        [
+          {
+            "node": "Requeue Stale Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requeue Stale Scores": {
+      "main": [
+        [
+          {
+            "node": "Sweep Result",
             "type": "main",
             "index": 0
           }

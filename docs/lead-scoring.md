@@ -13,8 +13,12 @@ Every 15 Minutes
   -> Claim And Open Run                            (claim + open the run in one statement)
   -> Build Scoring Request -> Scoring Agent        (local, ~13s)
   -> Validate And Guard -> Scoring Valid?
-       +-- true  -> Write Scores -> Close Run Success -> Scored
+       +-- true  -> Write Scores -> Close Run Success -+-> Scored
+       |                                               +-> Reached HOT? -> Queue Hot Alert
        +-- false -> Close Run Error
+
+Nightly Sweep (03:20)
+  -> Requeue Stale Scores -> Sweep Result
 ```
 
 ## The model proposes, the workflow enforces
@@ -92,10 +96,52 @@ of "no contactable person" rather than a bug. The note lands in
 When people do exist, the insert is `ON CONFLICT (company_id, person_id) DO
 UPDATE`, so re-scoring moves a lead's score instead of duplicating it.
 
+## The nightly sweep
+
+Scoring is not a one-off verdict. Two things make an old score wrong:
+
+- **A contact appears.** `decision_maker_score` is a property of the `people`
+  table rather than a judgement, so a company that had nobody on file is scored
+  differently the moment WF-03 finds someone - and that is also the moment its
+  first lead can exist.
+- **Age.** Evidence goes stale. `RESCORE_AFTER_DAYS` defaults to 7.
+
+The sweep does not re-score anything itself. It moves companies from `scored`
+back to `researched` and the 15 minute pass above picks them up, so there is
+exactly one scoring path and no second copy of the guards to keep in step.
+
+`IGNORE` companies are skipped unless somebody was added to them. Re-scoring a
+company that was capped to `IGNORE` spends a model call to reach the same
+answer; a new contact is the one thing that can change it.
+
+The requeue is re-checked against `status = 'scored'` inside the UPDATE, so two
+overlapping sweeps cannot both claim a row, and a second run finds nothing.
+
+## Reaching HOT
+
+`docs/telegram.md` lists "company reaches HOT" as an immediate notification.
+`Reached HOT?` reads `score_band` from `Write Scores`, which is the value the
+database generated - not the model's arithmetic, which `docs/scoring.md` says
+never wins.
+
+The alert hangs off `Close Run Success` as a **second branch** rather than
+sitting inside the chain. `Scored` reads `$json.duration_ms` from `Close Run
+Success` and resolves `$('Write Scores').item` by paired item; routing it through
+two more nodes would break both. A notification is not worth a regression in the
+path that writes the score.
+
+The message carries the top five signals with their source URLs, and says
+explicitly when there is no contact on file - which today is always, because
+WF-03 does not exist. Deduplicated on the company for `HOT_ALERT_COOLOFF_DAYS`
+(30), so a company that is re-scored nightly and stays HOT is not news twice.
+
 ## Running it
 
-Schedule, every 15 minutes, once activated. By hand: open it and click **Test
-workflow** - the CLI cannot start a schedule-triggered workflow.
+Schedule, every 15 minutes, once activated, plus the sweep at 03:20. By hand:
+open it and click **Test workflow** - the CLI cannot start a schedule-triggered
+workflow (`n8n execute` answers "Missing node to start execution"). To run one
+from the CLI anyway, import a copy whose trigger is a Manual Trigger, execute
+that by id, and delete it afterwards.
 
 Five companies per run, set in the `Claim And Open Run` node. At roughly 15
 seconds each that is comfortable inside the schedule.

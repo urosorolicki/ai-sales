@@ -29,6 +29,7 @@ make migrate-status     # what is applied, what is pending
 | `0010_views.sql` | read models for Telegram, reports and health |
 | `0011_notifications.sql` | `notifications` outbox, `queue_notification()`, `v_pending_notifications` |
 | `0012_fetch_throttle.sql` | `domain_fetch_log`, `claim_domain_fetch()` |
+| `0013_enrichment.sql` | `people.source_url` and `discovery_method`, `enrichment` agent name |
 
 ### Rules
 
@@ -60,6 +61,7 @@ failed transaction rather than a wrong outcome:
 | `error` implies an error message | Check constraint on `agent_runs` |
 | One alert per deduplication identity | Unique index on `notifications(dedup_key)` |
 | One fetch per domain per cooldown | `claim_domain_fetch()`, test and stamp in one statement |
+| No duplicate person by name per company | Unique index on `(company_id, lower(btrim(full_name)))` |
 
 The last two follow the same reasoning as the rest of this table. Deduplicating
 alerts in each workflow would mean five copies of the rule and five chances to

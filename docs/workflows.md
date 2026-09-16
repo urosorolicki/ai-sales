@@ -69,14 +69,19 @@ implemented.
 
 ## WF-03 Contact Enrichment
 
+**Built** - see `docs/contact-enrichment.md`. Not the provider lookup specified
+below: there is no budget for one, so it reads the company's own website. An
+address a company publishes is better provenance than a provider record anyway;
+what it costs is coverage, and finding nobody is the common outcome.
+
 | | |
 |---|---|
 | Trigger | Schedule, hourly |
 | Input | Companies with `score_band` in OUTREACH, HIGH_PRIORITY or HOT and no contactable person |
-| Steps | Provider lookup for decision makers; email verification |
-| Output | `people` rows; `companies.status` moves `enriching` then `ready` |
-| Guards | Only enrich companies that already scored above the threshold. Enrichment costs money; never enrich before scoring. |
-| Failure | No contact found is a normal outcome. The company stays scored and is not retried for 30 days. |
+| Steps | Fetch the contact, team, about and careers pages; a local model transcribes the people; every name and address is verified against the fetched text; an address pattern observed on that domain may be applied to a named person |
+| Output | `people` rows with `source_url` and `discovery_method`; `companies.status` back to `researched` so WF-04 re-scores and creates the lead |
+| Guards | Only enrich companies that already scored above the threshold. Only addresses on the company's own domain. Role addresses are never written as people. No blind guessing: a derived address requires a real one observed on the same domain. |
+| Failure | No contact found is a normal outcome, recorded as a `skipped` run. The company goes back to `scored` and is not retried for 30 days. |
 
 ## WF-04 Lead Scoring
 
@@ -241,5 +246,6 @@ cheap to get right:
 4. WF-10 and WF-100, so there is a feedback loop. **Done**, along with WF-101.
    Delivery needs a bot token; until there is one the loop is
    `SELECT * FROM v_pending_notifications`.
-5. WF-01 and WF-03 only once the pipeline produces drafts worth having.
+5. WF-01 only once the pipeline produces drafts worth having. WF-03 is
+   **done**, reading company websites rather than a paid provider.
 6. WF-06, last, and only after a human has approved and read a batch.

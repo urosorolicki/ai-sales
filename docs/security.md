@@ -86,6 +86,28 @@ in most of the EU, but carries obligations:
 This is a description of the obligations the system is built to meet, not legal
 advice. Rules differ by country and the operator is responsible for their own.
 
+### Where contact details come from
+
+Accuracy and provenance are the two obligations that a cold outreach pipeline
+gets wrong first, so WF-03 records both on every row it writes. Nothing is
+stored without `source_url` and `discovery_method`
+(`postgres/migrations/0013_enrichment.sql`), which means "where did you get my
+details" always has an answer.
+
+| How | Recorded as | Standing |
+|---|---|---|
+| Published on the company's own site | `published_page` | The company put the address there to be written to. The cleanest footing legitimate interest has. |
+| Derived from a pattern seen in a published address on the same domain | `pattern_inferred` | An inference, marked as one. Only ever from an address that company itself published. |
+
+**Blind guessing is deliberately not implemented.** Trying `first.last@`,
+`f.last@` and the rest against a domain that has never shown one produces more
+addresses and no evidence: the address can belong to somebody else, it cannot be
+sourced, and it is the case where accuracy and the right to know the origin both
+fail at once. `docs/contact-enrichment.md` has the mechanism.
+
+WF-03 only writes addresses on the company's own domain, and never writes a role
+address (`hello@`, `jobs@`) as though a person were behind it.
+
 ## Suppression
 
 The suppression list is the one rule the system enforces in three places:

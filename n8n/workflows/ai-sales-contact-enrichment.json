@@ -1,0 +1,828 @@
+{
+  "id": "wf03ContactEnrichment",
+  "name": "AI Sales — WF-03 Contact Enrichment",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000001",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -320,
+        300
+      ],
+      "notes": "Hourly, per the WF-03 row in docs/workflows.md."
+    },
+    {
+      "parameters": {
+        "fileSelector": "/prompts/enrichment.md",
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000002",
+      "name": "Read Enrichment Prompt",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -100,
+        300
+      ],
+      "notes": "./prompts is mounted read-only. The file on disk is the single source of truth."
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000003",
+      "name": "Prompt To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/agents/enrichment/schema.json",
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000004",
+      "name": "Read Enrichment Schema",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000005",
+      "name": "Schema To Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claim companies that are worth a contact lookup, and open the run in the same\n-- statement so the agent_runs row is the claim (the pattern WF-04 uses).\n--\n-- docs/workflows.md: \"Only enrich companies that already scored above the\n-- threshold.\" That was written when enrichment cost provider credits. It costs\n-- nothing now, but the rule stays: a contact for a company nobody will write to\n-- is personal data held for no reason, which docs/security.md calls out under\n-- data minimisation.\n--\n-- \"No contact found is a normal outcome. The company stays scored and is not\n-- retried for 30 days.\" The agent_runs row is that memory - there is no retry\n-- column and no migration for one.\n--\n-- The per-domain fetch throttle from 0012 applies here too: WF-02 and WF-03 both\n-- fetch from the same hosts, and the limit is per domain, not per workflow.\nWITH candidates AS (\n    SELECT c.id, c.domain\n    FROM companies c\n    WHERE c.status = 'scored'\n      AND c.score_band IN ('OUTREACH', 'HIGH_PRIORITY', 'HOT')\n      -- Someone contactable already exists: nothing to do.\n      AND NOT EXISTS (\n          SELECT 1 FROM people p\n          WHERE p.company_id = c.id\n            AND p.email IS NOT NULL\n            AND p.email_status IN ('valid', 'catch_all', 'guessed')\n      )\n      -- Tried recently, found nothing. Not again yet.\n      AND NOT EXISTS (\n          SELECT 1 FROM agent_runs r\n          WHERE r.company_id = c.id\n            AND r.agent_name = 'enrichment'\n            AND r.status IN ('success', 'skipped')\n            AND r.started_at > now() - make_interval(days => ($1::jsonb ->> 'retry_days')::int)\n      )\n      -- Already being enriched by a run that is still alive.\n      AND NOT EXISTS (\n          SELECT 1 FROM agent_runs r\n          WHERE r.company_id = c.id\n            AND r.agent_name = 'enrichment'\n            AND r.status     = 'running'\n            AND r.started_at > now() - interval '15 minutes'\n      )\n    ORDER BY c.total_score DESC, c.updated_at\n    LIMIT ($1::jsonb ->> 'candidate_pool')::int\n    FOR UPDATE SKIP LOCKED\n),\nallowed AS (\n    SELECT id\n    FROM candidates\n    WHERE claim_domain_fetch(\n              domain,\n              make_interval(mins => ($1::jsonb ->> 'domain_cooldown_minutes')::int)\n          )\n    LIMIT ($1::jsonb ->> 'batch_size')::int\n),\nclaimed AS (\n    UPDATE companies\n    SET status = 'enriching'\n    WHERE id IN (SELECT id FROM allowed)\n      AND status = 'scored'\n    RETURNING id, name, domain, website\n),\nopened AS (\n    INSERT INTO agent_runs (agent_name, company_id, input, status, model, started_at)\n    SELECT 'enrichment', claimed.id, $1::jsonb -> 'input', 'running', $1::jsonb ->> 'model', now()\n    FROM claimed\n    RETURNING id AS agent_run_id, company_id\n)\nSELECT o.agent_run_id,\n       c.id            AS company_id,\n       c.name,\n       c.domain::text  AS domain,\n       c.website\nFROM opened o\nJOIN companies c ON c.id = o.company_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ batch_size: Number($env.ENRICH_BATCH_SIZE || 3), candidate_pool: Number($env.ENRICH_CANDIDATE_POOL || 15), retry_days: Number($env.ENRICH_RETRY_DAYS || 30), domain_cooldown_minutes: Number($env.RESEARCH_DOMAIN_COOLDOWN_MINUTES || 60), model: $env.OLLAMA_ENRICHMENT_MODEL || $env.OLLAMA_MODEL || 'llama3.1:8b', input: { execution_id: String($execution.id), workflow_id: $workflow.id, stage: 'enrichment' } } ) }}"
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000006",
+      "name": "Claim Companies",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        700,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Scored companies above the band, with nobody contactable, not tried in 30 days, outside the domain cooldown."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the page list for one company. Nothing is fetched here.\n//\n// Different pages from WF-02 on purpose. WF-02 is looking for evidence of\n// engineering work; this is looking for who to write to, and those live on\n// different pages. /team and /contact are the two that matter and neither is in\n// the research list.\n\nconst PATHS = [\n  '/contact', '/contact-us', '/kontakt',\n  '/team', '/our-team', '/about', '/about-us', '/company',\n  '/people', '/leadership', '/management',\n  '/careers', '/jobs',\n  '',\n];\nconst USER_AGENT = 'AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)';\n\nreturn $input.all().map((item) => {\n  const c = item.json;\n  const site = typeof c.website === 'string' && /^https?:\\/\\//i.test(c.website)\n    ? c.website.replace(/\\/+$/, '')\n    : 'https://' + c.domain;\n\n  return {\n    json: {\n      ...c,\n      base_url: site,\n      robots_url: site + '/robots.txt',\n      candidate_urls: PATHS.map((p) => site + p),\n      user_agent: USER_AGENT,\n    },\n  };\n});\n"
+      },
+      "id": "c0300000-0000-4000-8000-000000000007",
+      "name": "Contact URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "notes": "Different pages from WF-02: /team and /contact are where people are named."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.robots_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 3
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000008",
+      "name": "Fetch robots.txt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        300
+      ],
+      "notes": "Same rule as WF-02. A research bot that ignores robots.txt gets the IP blocked."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Apply robots.txt before fetching anything.\n//\n// This is a copy of the same node in WF-02, with the upstream node renamed.\n// n8n has no way to share a function between workflows short of a sub-workflow\n// call, and a sub-workflow for sixty lines of parsing would cost more than it\n// saves. IF YOU CHANGE THE PARSING HERE, CHANGE IT IN WF-02 TOO - the whole\n// point of honouring robots.txt is that it is honoured everywhere.\n//\nfunction parseRobots(text, agent) {\n  const groups = [];\n  let current = null;\n  for (const rawLine of String(text).split(/\\r?\\n/)) {\n    const line = rawLine.replace(/#.*$/, '').trim();\n    if (!line) continue;\n    const idx = line.indexOf(':');\n    if (idx === -1) continue;\n    const field = line.slice(0, idx).trim().toLowerCase();\n    const value = line.slice(idx + 1).trim();\n\n    if (field === 'user-agent') {\n      if (!current || current.rules.length) {\n        current = { agents: [], rules: [] };\n        groups.push(current);\n      }\n      current.agents.push(value.toLowerCase());\n    } else if ((field === 'allow' || field === 'disallow') && current) {\n      current.rules.push({ allow: field === 'allow', path: value });\n    }\n  }\n\n  const token = agent.split('/')[0].toLowerCase();\n  const exact = groups.find((g) => g.agents.includes(token));\n  const wildcard = groups.find((g) => g.agents.includes('*'));\n  return (exact || wildcard || { rules: [] }).rules;\n}\n\nfunction isAllowed(path, rules) {\n  let best = null;\n  for (const rule of rules) {\n    // An empty Disallow means \"allow everything\" and matches nothing.\n    if (rule.path === '') continue;\n    const pattern = rule.path.replace(/\\*+$/, '');\n    if (!path.startsWith(pattern)) continue;\n    if (best === null || pattern.length > best.length) {\n      best = { length: pattern.length, allow: rule.allow };\n    }\n  }\n  return best === null ? true : best.allow;\n}\n\nconst companies = $('Contact URLs').all();\nconst out = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const company = companies[i].json;\n  const res = $input.all()[i].json ?? {};\n\n  // neverError is on, so a 404 arrives as data, not as an exception. Either way\n  // an unreadable robots.txt means no restrictions were published.\n  const body = typeof res.data === 'string' ? res.data : '';\n  const rules = body ? parseRobots(body, company.user_agent) : [];\n\n  const allowed = [];\n  const blocked = [];\n  for (const url of company.candidate_urls) {\n    const path = url.slice(company.base_url.length) || '/';\n    (isAllowed(path, rules) ? allowed : blocked).push(url);\n  }\n\n  out.push({\n    json: {\n      ...company,\n      urls: allowed,\n      robots_blocked: blocked,\n      robots_rules_found: rules.length,\n    },\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "c0300000-0000-4000-8000-000000000009",
+      "name": "Allowed URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ],
+      "notes": "A copy of WF-02's parser. Change one and change the other."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "urls",
+        "include": "allOtherFields",
+        "options": {
+          "destinationFieldName": "url"
+        }
+      },
+      "id": "c0300000-0000-4000-8000-00000000000a",
+      "name": "Split URLs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        300
+      ],
+      "notes": "allOtherFields because the HTTP node replaces the item json and would lose company_id."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 3
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": "={{ Number($env.RESEARCH_FETCH_BATCH_SIZE || 1) }}",
+              "batchInterval": "={{ Number($env.RESEARCH_FETCH_BATCH_INTERVAL_MS || 1000) }}"
+            }
+          }
+        }
+      },
+      "id": "c0300000-0000-4000-8000-00000000000b",
+      "name": "Fetch Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        300
+      ],
+      "notes": "One request at a time by default. domain_fetch_log is the limit between runs; this is the limit inside one."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per fetched page arrives here. Group them back per company.\n//\n// The difference from WF-02's version of this node is what it keeps. WF-02\n// strips tags to plain text, which throws away every mailto: link on the page -\n// and a mailto: href is the single most reliable published address there is,\n// because a human put it there to be clicked. They are pulled out of the raw\n// HTML before anything is stripped.\n\nconst MAX_CHARS_PER_PAGE = 5000;\nconst MAX_CHARS_TOTAL = 20000;\nconst MAX_EMAILS = 40;\n\n// Deliberately narrow. A greedy pattern matches version strings, image hashes\n// and CSS selectors, and every false positive becomes something the verifier\n// has to reject later.\nconst EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g;\n\nfunction htmlToText(html) {\n  return String(html)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<!--[\\s\\S]*?-->/g, ' ')\n    .replace(/<\\/(p|div|li|h[1-6]|tr|section|article|td)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// Some sites write addresses as \"name (at) example.com\" to defeat scrapers.\n// Undoing that is reading what the page says, not defeating anything: the\n// address is published, and the obfuscation is aimed at bulk harvesters.\nfunction deobfuscate(text) {\n  return String(text)\n    .replace(/\\s*\\(\\s*at\\s*\\)\\s*/gi, '@')\n    .replace(/\\s*\\[\\s*at\\s*\\]\\s*/gi, '@')\n    .replace(/\\s+at\\s+([A-Za-z0-9.-]+)\\s+dot\\s+([A-Za-z]{2,})/gi, '@$1.$2')\n    .replace(/\\s*\\(\\s*dot\\s*\\)\\s*/gi, '.')\n    .replace(/\\s*\\[\\s*dot\\s*\\]\\s*/gi, '.');\n}\n\nconst pages = $input.all();\nconst context = $('Split URLs').all();\nconst byCompany = new Map();\n\nfor (let i = 0; i < pages.length; i++) {\n  const j = { ...context[i].json, ...(pages[i].json ?? {}) };\n  const key = j.company_id;\n  if (!key) continue;\n\n  if (!byCompany.has(key)) {\n    byCompany.set(key, {\n      agent_run_id: j.agent_run_id,\n      company_id: j.company_id,\n      name: j.name,\n      domain: j.domain,\n      base_url: j.base_url,\n      robots_blocked: j.robots_blocked ?? [],\n      sources: [],\n      fetch_failures: [],\n      sections: [],\n      emails: [],\n    });\n  }\n  const bucket = byCompany.get(key);\n\n  const res = pages[i].json ?? {};\n  const failed = res.error !== undefined || typeof res.data !== 'string' || res.data === '';\n  if (failed) {\n    const reason = res.error\n      ? (typeof res.error === 'string' ? res.error : (res.error.message ?? 'request failed'))\n      : 'empty response';\n    bucket.fetch_failures.push(j.url + ' (' + reason + ')');\n    continue;\n  }\n\n  const html = res.data;\n\n  // mailto: first, off the raw HTML, before the tags are gone.\n  for (const m of html.matchAll(/mailto:([^\"'?\\s>]+)/gi)) {\n    const address = decodeURIComponent(m[1]).trim().toLowerCase();\n    if (EMAIL_RE.test(address)) {\n      EMAIL_RE.lastIndex = 0;\n      bucket.emails.push({ email: address, source: j.url, from: 'mailto' });\n    }\n    EMAIL_RE.lastIndex = 0;\n  }\n\n  const text = deobfuscate(htmlToText(html));\n  for (const m of text.matchAll(EMAIL_RE)) {\n    bucket.emails.push({ email: m[0].trim().toLowerCase(), source: j.url, from: 'text' });\n  }\n\n  if (text.length < 40) {\n    bucket.fetch_failures.push(j.url + ' (no usable text)');\n    continue;\n  }\n\n  bucket.sources.push(j.url);\n  bucket.sections.push('### SOURCE: ' + j.url + '\\n' + text.slice(0, MAX_CHARS_PER_PAGE));\n}\n\nconst out = [];\nfor (const bucket of byCompany.values()) {\n  let material = bucket.sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n\n  // Deduplicate, keeping the first sighting of each address so its source is\n  // the page it was actually read from.\n  const seen = new Set();\n  const emails = [];\n  for (const e of bucket.emails) {\n    if (seen.has(e.email)) continue;\n    seen.add(e.email);\n    emails.push(e);\n    if (emails.length >= MAX_EMAILS) break;\n  }\n\n  const { sections, emails: _raw, ...rest } = bucket;\n  out.push({\n    json: {\n      ...rest,\n      material,\n      material_chars: material.length,\n      material_truncated: truncated,\n      pages_fetched: bucket.sources.length,\n      // The verifier checks model output against this, so it has to carry the\n      // addresses found in the raw HTML as well as the stripped text.\n      harvested_emails: emails,\n      // Truncation matters here: an address past the cut is not in the material\n      // the model saw, and the verifier would reject it as invented.\n      verification_haystack: (material + '\\n' + emails.map((e) => e.email).join('\\n')).toLowerCase(),\n    },\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "c0300000-0000-4000-8000-00000000000c",
+      "name": "Group Material",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        300
+      ],
+      "notes": "Pulls mailto: addresses out of the raw HTML before the tags are stripped."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the enrichment request. The prompt comes from prompts/enrichment.md\n// and the output contract from agents/enrichment/schema.json, both read from\n// disk, so neither is restated here and neither can drift from this node.\n\nconst MODEL = $env.OLLAMA_ENRICHMENT_MODEL || $env.OLLAMA_MODEL || 'llama3.1:8b';\n\nfunction extractSystemPrompt(markdown) {\n  const section = markdown.split(/^##\\s+System prompt\\s*$/m)[1];\n  if (!section) throw new Error('prompts/enrichment.md: no \"## System prompt\" heading found');\n  const fence = section.match(/```[a-z]*\\n([\\s\\S]*?)\\n```/);\n  if (!fence) throw new Error('prompts/enrichment.md: no fenced block under \"## System prompt\"');\n  const text = fence[1].trim();\n  if (text.length < 200) throw new Error('prompts/enrichment.md: system prompt looks truncated');\n  return text;\n}\n\n// Everything after the system prompt is the working guidance: who to return,\n// what to do with titles, what \"verbatim\" means. The model needs it.\nfunction extractGuidance(markdown) {\n  const start = markdown.indexOf('## Who to return');\n  if (start === -1) throw new Error('prompts/enrichment.md: no \"## Who to return\" section');\n  return markdown.slice(start).trim();\n}\n\nconst doc = $('Prompt To Text').first().json.data;\nconst systemPrompt = extractSystemPrompt(doc) + '\\n\\n' + extractGuidance(doc);\n\nconst schema = JSON.parse($('Schema To Text').first().json.data);\ndelete schema.$schema;\ndelete schema.$id;\ndelete schema.title;\n\nreturn $input.all().map((item) => {\n  const c = item.json;\n\n  const lines = [\n    'COMPANY',\n    'Name: ' + c.name,\n    'Domain: ' + c.domain,\n    '',\n    'ADDRESSES ALREADY FOUND IN THE MARKUP',\n    c.harvested_emails.length\n      ? c.harvested_emails.map((e) => '- ' + e.email + '  (' + e.source + ')').join('\\n')\n      : 'none',\n    '',\n    'PAGES',\n    c.material || '(no readable text was fetched)',\n    '',\n    'Return the people and the role addresses you can read above.',\n    'An empty result is a normal answer.',\n  ];\n\n  return {\n    json: {\n      agent_run_id: c.agent_run_id,\n      company_id: c.company_id,\n      name: c.name,\n      domain: c.domain,\n      model: MODEL,\n      llm_request: {\n        model: MODEL,\n        temperature: 0,\n        max_tokens: 3000,\n        // Transcription, not reasoning. See docs/ollama.md for why this has to\n        // be \"none\" and not \"low\".\n        reasoning_effort: 'none',\n        messages: [\n          { role: 'system', content: systemPrompt },\n          { role: 'user', content: lines.join('\\n') },\n        ],\n        response_format: {\n          type: 'json_schema',\n          json_schema: { name: 'enrichment', strict: true, schema },\n        },\n      },\n    },\n  };\n});\n"
+      },
+      "id": "c0300000-0000-4000-8000-00000000000d",
+      "name": "Build Enrichment Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2100,
+        300
+      ],
+      "notes": "Prompt and schema read from disk, so this node cannot drift from them."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://ollama:11434') + '/v1/chat/completions' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "c0300000-0000-4000-8000-00000000000e",
+      "name": "Enrichment Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2300,
+        300
+      ],
+      "notes": "Local model, no cost. /v1/chat/completions because /api/chat ignores the schema - see docs/ollama.md."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verify everything the model said against the pages it was given.\n//\n// docs/architecture.md: the rules that matter are enforced, not requested. The\n// prompt asks the model to transcribe rather than invent; this node is what\n// makes that true. Nothing here trusts a single field of the response.\n//\n// The stakes are not abstract. An address that nobody published goes to a real\n// person at a real company, and the first anyone hears of it is a bounce, a\n// spam complaint, or a reply asking who we are and where we got their details -\n// which under GDPR is a question with a required answer (docs/security.md).\n\nconst ROLE_LOCALPARTS = new Set([\n  'info', 'hello', 'contact', 'kontakt', 'office', 'mail', 'email', 'enquiries',\n  'inquiries', 'jobs', 'careers', 'career', 'recruiting', 'recruitment', 'hr',\n  'posao', 'sales', 'support', 'help', 'admin', 'press', 'media', 'marketing',\n  'billing', 'invoice', 'accounts', 'finance', 'legal', 'privacy', 'security',\n  'abuse', 'postmaster', 'webmaster', 'noreply', 'no-reply', 'donotreply',\n  'newsletter', 'team', 'partners', 'business', 'general',\n]);\n\nconst EMAIL_SHAPE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$/;\n\nconst SENIORITY = [\n  [/\\b(ceo|chief\\s|cto|cio|ciso|coo|cfo|founder|co-founder|owner|managing director)\\b/i, 'c_level'],\n  [/\\b(vp|vice president)\\b/i, 'vp'],\n  [/\\bhead of\\b/i, 'head'],\n  [/\\bdirector\\b/i, 'director'],\n  [/\\b(manager|lead engineer|engineering manager)\\b/i, 'manager'],\n  [/\\b(lead|principal|staff)\\b/i, 'lead'],\n  [/\\bsenior\\b/i, 'senior'],\n];\n\n// Fold a name to the letters an email address would use: strip diacritics, drop\n// everything that is not a letter. NFD handles c-caron and friends; d-stroke and\n// eszett do not decompose and have to be listed.\nfunction fold(value) {\n  return String(value || '')\n    .normalize('NFD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/đ/g, 'd')\n    .replace(/Đ/g, 'd')\n    .replace(/ß/g, 'ss')\n    .replace(/ø/g, 'o')\n    .replace(/ł/g, 'l')\n    .replace(/æ/g, 'ae')\n    .toLowerCase()\n    .replace(/[^a-z]/g, '');\n}\n\n// Ordered most specific first. A single observed address can match more than\n// one of these; the first match wins, so \"first\" and \"last\" alone sit at the\n// bottom where they cannot steal a match from a two-part pattern.\nconst PATTERNS = [\n  { id: 'first.last', build: (f, l) => (f && l ? f + '.' + l : null) },\n  { id: 'f.last',     build: (f, l) => (f && l ? f[0] + '.' + l : null) },\n  { id: 'first_last', build: (f, l) => (f && l ? f + '_' + l : null) },\n  { id: 'first-last', build: (f, l) => (f && l ? f + '-' + l : null) },\n  { id: 'firstlast',  build: (f, l) => (f && l ? f + l : null) },\n  { id: 'flast',      build: (f, l) => (f && l ? f[0] + l : null) },\n  { id: 'last.first', build: (f, l) => (f && l ? l + '.' + f : null) },\n  { id: 'lastf',      build: (f, l) => (f && l ? l + f[0] : null) },\n  { id: 'first',      build: (f) => f || null },\n  { id: 'last',       build: (f, l) => l || null },\n];\n\nfunction nameParts(fullName) {\n  const parts = String(fullName || '').trim().split(/\\s+/).filter(Boolean);\n  if (parts.length === 0) return { first: '', last: '' };\n  return { first: fold(parts[0]), last: fold(parts[parts.length - 1]) };\n}\n\nfunction seniorityFromTitle(title) {\n  for (const [re, value] of SENIORITY) if (re.test(String(title || ''))) return value;\n  return 'unknown';\n}\n\nconst claims = $('Claim Companies').all();\nconst material = $('Group Material').all();\nconst requests = $('Build Enrichment Request').all();\nconst responses = $input.all();\n\nconst out = [];\n\nfor (let i = 0; i < responses.length; i++) {\n  const req = requests[i].json;\n  const mat = material[i].json;\n  const res = responses[i].json ?? {};\n\n  const errors = [];\n  const notes = [];\n  const dropped = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  // ---- the response itself -------------------------------------------------\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Enrichment model request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n    const choice = Array.isArray(res.choices) ? res.choices[0] : null;\n    if (!choice) {\n      errors.push('Response contained no choices');\n    } else if (choice.finish_reason === 'length') {\n      errors.push('Response hit the token limit and is truncated. Use a model with a ' +\n        'larger context window (OLLAMA_ENRICHMENT_MODEL)');\n    } else {\n      raw = (choice.message && choice.message.content) || '';\n      if (!raw.trim()) errors.push('Model returned no text content');\n      else {\n        try { parsed = JSON.parse(raw); } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (errors.length) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, company_id: req.company_id,\n      name: req.name, domain: req.domain,\n      valid: false, has_people: false, run_status: 'error',\n      errors, error_message: errors.join('; '), notes: [], people: [], role_addresses: [],\n      dropped: [], pattern: null, raw_response: raw, model_output: parsed, usage,\n    } });\n    continue;\n  }\n\n  const haystack = String(mat.verification_haystack || '');\n  const domain = String(req.domain || '').toLowerCase();\n  const harvested = new Map((mat.harvested_emails || []).map((e) => [e.email, e.source]));\n\n  const onCompanyDomain = (email) => {\n    const at = email.lastIndexOf('@');\n    if (at === -1) return false;\n    const host = email.slice(at + 1);\n    return host === domain || host.endsWith('.' + domain);\n  };\n  const isRole = (email) => ROLE_LOCALPARTS.has(email.slice(0, email.indexOf('@')));\n\n  // An address is only accepted if the pages actually contain it. The harvest\n  // is the stronger check - it came out of the markup - but the haystack covers\n  // an address the harvester's pattern missed.\n  // A local model asked for a nullable field often answers with the string\n  // \"null\" rather than JSON null. Treating that as a rejected address filled\n  // the audit trail with drops for people who simply had no address, which\n  // makes the real drops - the invented ones - harder to see.\n  const ABSENT = new Set(['', 'null', 'none', 'n/a', 'na', 'unknown', 'undefined', '-']);\n\n  function acceptEmail(candidate, who) {\n    if (!candidate) return null;\n    const email = String(candidate).trim().toLowerCase();\n    if (ABSENT.has(email)) return null;\n    if (!EMAIL_SHAPE.test(email)) { dropped.push(who + ': \"' + candidate + '\" is not an address'); return null; }\n    if (!harvested.has(email) && !haystack.includes(email)) {\n      dropped.push(who + ': address \"' + email + '\" does not appear on any fetched page');\n      return null;\n    }\n    if (!onCompanyDomain(email)) {\n      dropped.push(who + ': address \"' + email + '\" is not on ' + domain);\n      return null;\n    }\n    return email;\n  }\n\n  // ---- people --------------------------------------------------------------\n  const rawPeople = Array.isArray(parsed.people) ? parsed.people : [];\n  const people = [];\n  const usedEmails = new Set();\n\n  for (const p of rawPeople) {\n    const fullName = String(p.full_name || '').trim().replace(/\\s+/g, ' ');\n    if (fullName.length < 3 || !/\\s/.test(fullName)) {\n      dropped.push('person \"' + fullName + '\": not a full name');\n      continue;\n    }\n    // An invented person cannot survive this. Whitespace is normalised on both\n    // sides because a name can be split across markup.\n    const foldedName = fullName.toLowerCase();\n    const firstWord = foldedName.split(' ')[0];\n    const lastWord = foldedName.split(' ').pop();\n    if (!haystack.includes(foldedName) && !(haystack.includes(firstWord) && haystack.includes(lastWord))) {\n      dropped.push('person \"' + fullName + '\": name does not appear on any fetched page');\n      continue;\n    }\n\n    let title = p.title === null || p.title === undefined ? null : String(p.title).trim();\n    if (title && !haystack.includes(title.toLowerCase())) {\n      notes.push('title \"' + title + '\" for ' + fullName + ' is not on the page; dropped');\n      title = null;\n    }\n\n    let email = acceptEmail(p.email, 'person \"' + fullName + '\"');\n    if (email && isRole(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' is a role address, not a person');\n      email = null;\n    }\n    if (email && usedEmails.has(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' was already claimed by another person');\n      email = null;\n    }\n    if (email) usedEmails.add(email);\n\n    const parts = fullName.split(' ');\n    people.push({\n      full_name: fullName,\n      first_name: parts[0],\n      last_name: parts.length > 1 ? parts[parts.length - 1] : null,\n      title,\n      seniority: seniorityFromTitle(title),\n      email,\n      email_status: email ? 'valid' : 'unknown',\n      linkedin_url: typeof p.linkedin_url === 'string' && /^https?:\\/\\/(www\\.)?linkedin\\.com\\//i.test(p.linkedin_url)\n        ? p.linkedin_url : null,\n      source_url: email ? (harvested.get(email) || String(p.source || '')) : String(p.source || ''),\n      discovery_method: email ? 'published_page' : null,\n    });\n  }\n\n  // ---- role addresses ------------------------------------------------------\n  // Recorded, never written to people: a role address has no person behind it,\n  // and inventing one to satisfy a NOT NULL column would put \"Careers team\" in\n  // the greeting of an email.\n  const roleAddresses = [];\n  for (const r of (Array.isArray(parsed.role_addresses) ? parsed.role_addresses : [])) {\n    const email = acceptEmail(r.email, 'role address');\n    if (!email) continue;\n    roleAddresses.push({ email, purpose: r.purpose ? String(r.purpose).slice(0, 120) : null,\n                         source: harvested.get(email) || String(r.source || '') });\n  }\n\n  // ---- pattern inference ---------------------------------------------------\n  // The one place an address is produced rather than read, and it only happens\n  // when this company's own site already showed one built the same way.\n  //\n  // Scoring across every observed pair, not just the first: two people whose\n  // addresses disagree about the pattern means there is no pattern, and\n  // guessing anyway is how you write to somebody who does not exist.\n  const observed = people.filter((p) => p.email && p.first_name && p.last_name);\n  const tally = new Map();\n  for (const p of observed) {\n    const local = p.email.slice(0, p.email.indexOf('@'));\n    const { first, last } = nameParts(p.full_name);\n    for (const pattern of PATTERNS) {\n      if (pattern.build(first, last) === local) {\n        tally.set(pattern.id, (tally.get(pattern.id) || 0) + 1);\n        break; // first match only: the list is ordered most specific first\n      }\n    }\n  }\n\n  let chosen = null;\n  if (tally.size > 0) {\n    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]);\n    if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) {\n      chosen = ranked[0][0];\n    } else {\n      notes.push('observed addresses disagree about the pattern (' +\n        ranked.map(([id, n]) => id + ' x' + n).join(', ') + '); nothing was derived');\n    }\n  }\n\n  let derived = 0;\n  if (chosen) {\n    const builder = PATTERNS.find((p) => p.id === chosen);\n    const example = observed.find((p) => {\n      const { first, last } = nameParts(p.full_name);\n      return builder.build(first, last) === p.email.slice(0, p.email.indexOf('@'));\n    });\n    for (const p of people) {\n      if (p.email) continue;\n      const { first, last } = nameParts(p.full_name);\n      const local = builder.build(first, last);\n      if (!local || local.length < 2) continue;\n      const candidate = local + '@' + domain;\n      if (usedEmails.has(candidate) || harvested.has(candidate)) continue;\n      usedEmails.add(candidate);\n      p.email = candidate;\n      p.email_status = 'guessed';\n      p.discovery_method = 'pattern_inferred';\n      // The source is the page that proved the pattern, not a page containing\n      // this address - there is none, and pretending otherwise would make\n      // source_url a lie.\n      p.source_url = example ? example.source_url : (mat.sources || [])[0] || null;\n      derived += 1;\n    }\n    notes.push('address pattern \"' + chosen + '\" observed in ' + tally.get(chosen) +\n      ' published address(es); ' + derived + ' further address(es) derived from it');\n  } else if (people.some((p) => !p.email)) {\n    notes.push('no address pattern could be observed on this domain, so no address was derived');\n  }\n\n  if (rawPeople.length && !people.length) {\n    notes.push('every person the model returned failed verification; treated as nothing found');\n  }\n  if (!mat.pages_fetched) {\n    notes.push('no page was readable: ' + (mat.fetch_failures || []).slice(0, 3).join(', '));\n  }\n\n  out.push({ json: {\n    agent_run_id: req.agent_run_id,\n    company_id: req.company_id,\n    name: req.name,\n    domain: req.domain,\n    valid: true,\n    has_people: people.length > 0,\n    run_status: people.length > 0 ? 'success' : 'skipped',\n    errors: [],\n    error_message: null,\n    notes,\n    people,\n    role_addresses: roleAddresses,\n    dropped,\n    pattern: chosen,\n    derived_count: derived,\n    pages_fetched: mat.pages_fetched,\n    sources: mat.sources,\n    raw_response: raw,\n    model_output: parsed,\n    usage,\n  } });\n}\n\nreturn out;\n"
+      },
+      "id": "c0300000-0000-4000-8000-00000000000f",
+      "name": "Validate And Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        300
+      ],
+      "notes": "Every name and every address is checked against the fetched pages. This node is the whole point of the workflow."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e3-1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000010",
+      "name": "Usable Response?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2700,
+        300
+      ],
+      "notes": "False means the model failed, not that nothing was found."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e3-2",
+              "leftValue": "={{ $json.has_people }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000011",
+      "name": "Anything Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2900,
+        200
+      ],
+      "notes": "Nothing found is a normal outcome and is recorded as 'skipped', not as an error."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Write the verified contacts and hand the company back to scoring.\n--\n-- The company goes to 'researched', not to the 'ready' that docs/workflows.md\n-- specifies. 'ready' is a dead end: WF-04 claims 'researched', and it is WF-04\n-- that turns a person into a lead, so a company parked at 'ready' would have a\n-- contact and never a lead. Back to 'researched' means the 15 minute scoring\n-- pass picks it up, re-scores decision_maker from the people table, and creates\n-- the lead. Finding nothing returns it to 'scored' untouched.\nWITH payload AS (SELECT $1::jsonb AS p),\ncand AS (\n    SELECT (payload.p ->> 'company_id')::uuid            AS company_id,\n           person ->> 'full_name'                         AS full_name,\n           NULLIF(person ->> 'first_name', '')            AS first_name,\n           NULLIF(person ->> 'last_name', '')             AS last_name,\n           NULLIF(person ->> 'title', '')                 AS title,\n           NULLIF(person ->> 'seniority', '')             AS seniority,\n           NULLIF(person ->> 'email', '')::citext         AS email,\n           person ->> 'email_status'                      AS email_status,\n           NULLIF(person ->> 'linkedin_url', '')          AS linkedin_url,\n           NULLIF(person ->> 'source_url', '')            AS source_url,\n           NULLIF(person ->> 'discovery_method', '')      AS discovery_method\n    FROM payload, jsonb_array_elements(payload.p -> 'people') AS person\n),\n-- people has a unique index on email. An address that already belongs to a\n-- different row would abort the whole insert, so it is dropped to NULL instead:\n-- the person is still worth recording, and the row that already has the address\n-- is the one that keeps it.\nsafe AS (\n    SELECT c.*,\n           existing.email        AS existing_email,\n           existing.email_status AS existing_status,\n           existing.source_url   AS existing_source,\n           existing.discovery_method AS existing_method,\n           CASE\n               WHEN c.email IS NULL THEN NULL\n               WHEN EXISTS (\n                   SELECT 1 FROM people px\n                   WHERE px.email = c.email\n                     AND NOT (px.company_id = c.company_id\n                              AND lower(btrim(px.full_name)) = lower(btrim(c.full_name)))\n               ) THEN NULL\n               ELSE c.email\n           END AS incoming_email\n    FROM cand c\n    LEFT JOIN people existing\n           ON existing.company_id = c.company_id\n          AND lower(btrim(existing.full_name)) = lower(btrim(c.full_name))\n),\n-- Whether to take the incoming address is ONE decision, and the address, its\n-- status, its source and how it was found all follow from it. Deciding each of\n-- those separately is how a published address kept its status but picked up\n-- discovery_method = 'pattern_inferred' on a re-run, which made the audit trail\n-- say the opposite of the truth.\nresolved AS (\n    SELECT s.*,\n           (s.incoming_email IS NOT NULL\n            AND (s.existing_email IS NULL\n                 OR s.existing_status IS DISTINCT FROM 'valid'\n                 OR s.email_status = 'valid')) AS take_incoming\n    FROM safe s\n),\nins AS (\n    INSERT INTO people (\n        company_id, full_name, first_name, last_name, title, seniority,\n        email, email_status, linkedin_url, source_url, discovery_method\n    )\n    SELECT company_id, full_name, first_name, last_name, title, seniority,\n           CASE WHEN take_incoming THEN incoming_email ELSE existing_email END,\n           CASE WHEN take_incoming THEN email_status\n                ELSE COALESCE(existing_status, 'unknown') END,\n           linkedin_url,\n           COALESCE(CASE WHEN take_incoming THEN source_url ELSE existing_source END, source_url),\n           CASE WHEN take_incoming THEN discovery_method ELSE existing_method END\n    FROM resolved\n    -- EXCLUDED already carries the resolved values, because the decision above\n    -- was made against the row that is being conflicted with.\n    ON CONFLICT (company_id, lower(btrim(full_name))) DO UPDATE\n        SET title            = COALESCE(EXCLUDED.title, people.title),\n            seniority        = COALESCE(EXCLUDED.seniority, people.seniority),\n            linkedin_url     = COALESCE(EXCLUDED.linkedin_url, people.linkedin_url),\n            email            = EXCLUDED.email,\n            email_status     = EXCLUDED.email_status,\n            source_url       = EXCLUDED.source_url,\n            discovery_method = EXCLUDED.discovery_method\n    RETURNING id, email, email_status\n),\ncontactable AS (\n    SELECT count(*)::int AS n FROM ins WHERE email IS NOT NULL\n),\nupd AS (\n    UPDATE companies\n    SET status = CASE WHEN (SELECT n FROM contactable) > 0 THEN 'researched' ELSE 'scored' END\n    WHERE id = (SELECT company_id FROM cand LIMIT 1)\n      AND status = 'enriching'\n    RETURNING id, status\n)\nSELECT (SELECT count(*) FROM ins)::int   AS people_written,\n       (SELECT n FROM contactable)       AS contactable_written,\n       (SELECT status FROM upd)          AS company_status,\n       $1::jsonb ->> 'agent_run_id'      AS agent_run_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, agent_run_id: $json.agent_run_id, people: $json.people } ) }}"
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000012",
+      "name": "Write People",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3120,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Hands the company back to 'researched' so WF-04 re-scores it and creates the lead."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE agent_runs\nSET status        = 'success',\n    output        = $1::jsonb -> 'output',\n    error         = NULL,\n    prompt_tokens = ($1::jsonb #>> '{usage,prompt_tokens}')::int,\n    output_tokens = ($1::jsonb #>> '{usage,completion_tokens}')::int,\n    finished_at   = now()\nWHERE id = ($1::jsonb ->> 'agent_run_id')::uuid\nRETURNING id, company_id, status, duration_ms;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ agent_run_id: $('Validate And Verify').item.json.agent_run_id, usage: $('Validate And Verify').item.json.usage, output: { people: $('Validate And Verify').item.json.people, role_addresses: $('Validate And Verify').item.json.role_addresses, dropped: $('Validate And Verify').item.json.dropped, notes: $('Validate And Verify').item.json.notes, pattern: $('Validate And Verify').item.json.pattern, derived_count: $('Validate And Verify').item.json.derived_count, sources: $('Validate And Verify').item.json.sources, people_written: $json.people_written, contactable_written: $json.contactable_written, model_output: $('Validate And Verify').item.json.model_output } } ) }}"
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000013",
+      "name": "Close Run Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3340,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dropped is kept: what the model invented is as informative as what it read."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "company",
+              "value": "={{ $('Validate And Verify').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "e2",
+              "name": "domain",
+              "value": "={{ $('Validate And Verify').item.json.domain }}",
+              "type": "string"
+            },
+            {
+              "id": "e3",
+              "name": "people_written",
+              "value": "={{ $('Write People').item.json.people_written }}",
+              "type": "number"
+            },
+            {
+              "id": "e4",
+              "name": "contactable",
+              "value": "={{ $('Write People').item.json.contactable_written }}",
+              "type": "number"
+            },
+            {
+              "id": "e5",
+              "name": "pattern",
+              "value": "={{ $('Validate And Verify').item.json.pattern || 'none' }}",
+              "type": "string"
+            },
+            {
+              "id": "e6",
+              "name": "derived",
+              "value": "={{ $('Validate And Verify').item.json.derived_count }}",
+              "type": "number"
+            },
+            {
+              "id": "e7",
+              "name": "company_status",
+              "value": "={{ $('Write People').item.json.company_status }}",
+              "type": "string"
+            },
+            {
+              "id": "e8",
+              "name": "dropped",
+              "value": "={{ $('Validate And Verify').item.json.dropped.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "e9",
+              "name": "notes",
+              "value": "={{ $('Validate And Verify').item.json.notes.join(' | ') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000014",
+      "name": "Enriched",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3560,
+        100
+      ],
+      "notes": "A run that found people. company_status should read 'researched'."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Nothing usable came back. Put the company back exactly where it was and let\n-- the 30 day window in the claim query keep it there.\n--\n-- The run is closed as 'error' only when the model itself failed. A company\n-- whose pages simply do not name anybody is a 'skipped' run: it is not a fault,\n-- and recording it as one would make the WF-101 error rate meaningless.\nWITH payload AS (SELECT $1::jsonb AS p),\nupd AS (\n    UPDATE companies\n    SET status = 'scored'\n    FROM payload\n    WHERE companies.id = (payload.p ->> 'company_id')::uuid\n      AND companies.status = 'enriching'\n    RETURNING companies.id\n),\nrun AS (\n    UPDATE agent_runs\n    SET status      = payload.p ->> 'run_status',\n        error       = CASE WHEN payload.p ->> 'run_status' = 'error'\n                           THEN COALESCE(NULLIF(payload.p ->> 'error', ''), 'Enrichment failed with no message')\n                           ELSE NULL END,\n        output      = payload.p -> 'output',\n        finished_at = now()\n    FROM payload\n    WHERE agent_runs.id = (payload.p ->> 'agent_run_id')::uuid\n    RETURNING agent_runs.id, agent_runs.status\n)\nSELECT (SELECT count(*) FROM upd)::int AS companies_released,\n       (SELECT status FROM run)        AS run_status,\n       $1::jsonb ->> 'company_id'      AS company_id;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ company_id: $json.company_id, agent_run_id: $json.agent_run_id, run_status: $json.run_status, error: $json.error_message, output: { people: $json.people, role_addresses: $json.role_addresses, dropped: $json.dropped, notes: $json.notes, errors: $json.errors, pages_fetched: $json.pages_fetched, raw_response: $json.raw_response } } ) }}"
+        }
+      },
+      "id": "c0300000-0000-4000-8000-000000000015",
+      "name": "Release Company",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3120,
+        420
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Both the 'found nothing' and the 'model failed' paths. The company goes back to 'scored' either way."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "company",
+              "value": "={{ $('Validate And Verify').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "r2",
+              "name": "domain",
+              "value": "={{ $('Validate And Verify').item.json.domain }}",
+              "type": "string"
+            },
+            {
+              "id": "r3",
+              "name": "run_status",
+              "value": "={{ $json.run_status }}",
+              "type": "string"
+            },
+            {
+              "id": "r4",
+              "name": "pages_fetched",
+              "value": "={{ $('Validate And Verify').item.json.pages_fetched }}",
+              "type": "number"
+            },
+            {
+              "id": "r5",
+              "name": "dropped",
+              "value": "={{ $('Validate And Verify').item.json.dropped.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "r6",
+              "name": "notes",
+              "value": "={{ $('Validate And Verify').item.json.notes.join(' | ') }}",
+              "type": "string"
+            },
+            {
+              "id": "r7",
+              "name": "note",
+              "value": "Back to 'scored'. Not retried for ENRICH_RETRY_DAYS.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c0300000-0000-4000-8000-000000000016",
+      "name": "Released",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3340,
+        420
+      ],
+      "notes": "No contact found is a normal outcome, not a failure."
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Read Enrichment Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Enrichment Prompt": {
+      "main": [
+        [
+          {
+            "node": "Prompt To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prompt To Text": {
+      "main": [
+        [
+          {
+            "node": "Read Enrichment Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Enrichment Schema": {
+      "main": [
+        [
+          {
+            "node": "Schema To Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema To Text": {
+      "main": [
+        [
+          {
+            "node": "Claim Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Companies": {
+      "main": [
+        [
+          {
+            "node": "Contact URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact URLs": {
+      "main": [
+        [
+          {
+            "node": "Fetch robots.txt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch robots.txt": {
+      "main": [
+        [
+          {
+            "node": "Allowed URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allowed URLs": {
+      "main": [
+        [
+          {
+            "node": "Split URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split URLs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Page": {
+      "main": [
+        [
+          {
+            "node": "Group Material",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Material": {
+      "main": [
+        [
+          {
+            "node": "Build Enrichment Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Enrichment Request": {
+      "main": [
+        [
+          {
+            "node": "Enrichment Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichment Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate And Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate And Verify": {
+      "main": [
+        [
+          {
+            "node": "Usable Response?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Usable Response?": {
+      "main": [
+        [
+          {
+            "node": "Anything Found?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Release Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything Found?": {
+      "main": [
+        [
+          {
+            "node": "Write People",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Release Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write People": {
+      "main": [
+        [
+          {
+            "node": "Close Run Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Run Success": {
+      "main": [
+        [
+          {
+            "node": "Enriched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Company": {
+      "main": [
+        [
+          {
+            "node": "Released",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

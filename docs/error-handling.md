@@ -17,7 +17,8 @@ Artifact: `n8n/workflows/ai-sales-error-handler.json`
 | Failure | WF-99 has no error workflow of its own, on purpose - it must not be able to re-enter itself. |
 
 ```
-Error Trigger -> Error Context (Code) -> Close Agent Runs (Postgres) -> Alert Payload
+Error Trigger -> Error Context (Code) -> Close Agent Runs (Postgres)
+              -> Alert Payload -> Queue Alert (Postgres)
 ```
 
 ## How a run is correlated to an execution
@@ -72,23 +73,49 @@ redaction test, not by reading the code.
 has it, stored as `settings.errorWorkflow` in the exported JSON. WF-99 does not
 need to be active; error workflows are invoked directly.
 
-## Telegram
+## Alerting
 
-Not wired up. `TELEGRAM_ENABLED=false` and `TELEGRAM_BOT_TOKEN` is empty in
-`.env`, so there is nothing to send to.
+**Queue Alert** writes one row to the `notifications` outbox. WF-10 delivers it
+when Telegram is configured; until then it sits in the table and nothing is
+lost. Full detail in `docs/notifications.md`.
 
-The **Alert Payload** node already builds the message and emits
-`delivery: "not_configured"`. Turning it on is one Telegram node on the end of
-that chain, reading `alert` and `execution_url`.
+That node must not be able to fail the error handler: WF-99 has no error
+workflow of its own on purpose, so a failure here would be silent. It writes one
+row, with no joins and no casts that can throw.
 
-Two things are still missing and must not be forgotten when that happens:
+### Deduplication
 
-- **Deduplication.** `docs/workflows.md` requires it, so that one broken
-  schedule does not send 96 messages a day. Redis is the obvious place for a
-  short-TTL key per workflow and error, and there is no Redis credential in n8n
-  yet.
-- **Alert on WF-99's own failure.** Nothing watches the watcher. WF-101 Agent
-  Health is where that belongs.
+`docs/workflows.md` requires it so that one broken schedule does not send 96
+messages a day. The rule lives in `queue_notification()`
+(`postgres/migrations/0011_notifications.sql`) rather than in this workflow, so
+every caller gets it and none can opt out.
+
+Postgres rather than Redis, which was the original plan: n8n has a Postgres
+credential and no Redis one, a unique index makes a duplicate row impossible
+rather than merely unlikely, and "this has failed 43 times since Tuesday" is
+worth keeping across a restart.
+
+What WF-99 has to get right is the **identity** of a failure. Error Context
+builds it:
+
+```
+agent_failure:<workflow id>:<failed node>:<fingerprint of the message>
+```
+
+The message itself cannot be part of the identity. A timeout that names a
+different company, or a row count that ticks up by one, is the same fault. So
+the message is reduced first: UUIDs and numbers become placeholders, whitespace
+collapses, and what is left is the shape of the error. Two failures that differ
+only in which company they were processing produce one alert with a count.
+
+The fingerprint is computed from the **redacted** message, so a credential
+cannot reach the deduplication key either.
+
+### Alert on WF-99's own failure
+
+Still nothing watches the watcher directly. WF-101 Agent Health covers the
+closest observable symptom - notifications that were queued and never delivered
+- but a WF-99 that dies before writing its row leaves no trace anywhere.
 
 ## Verifying it
 

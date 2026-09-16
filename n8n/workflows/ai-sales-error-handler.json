@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Shape the failure for the audit trail and for whatever alerting is wired up\n// later. This node talks to nothing outside the host and never retries the\n// workflow that failed - see the WF-99 row in docs/workflows.md.\n\nconst MAX_MESSAGE = 500;\n\n// Credentials must never reach an alert or the audit trail (docs/security.md).\n// Order matters. The scheme rules (Bearer/Basic/Token) must run before the\n// generic key=value rule: otherwise the generic rule consumes the word \"Bearer\"\n// as if it were the value and leaves the actual token in the message.\nfunction redact(text) {\n  if (typeof text !== 'string') return '';\n  return text\n    .replace(/\\b([a-z][a-z0-9+.-]*):\\/\\/([^:\\s/@]+):([^@\\s]+)@/gi, '$1://$2:***@')\n    .replace(/\\beyJ[A-Za-z0-9._-]{16,}/g, '***jwt***')\n    .replace(/\\b(Bearer|Basic|Token)\\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 ***')\n    .replace(\n      /\\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)(?:(?:Bearer|Basic|Token)\\s+)?(\"?)[^\\s,;\"')]+\\3/gi,\n      '$1$2***',\n    );\n}\n\nfunction clip(text) {\n  return text.length > MAX_MESSAGE ? text.slice(0, MAX_MESSAGE) + ' ... [truncated]' : text;\n}\n\nconst src = $input.first().json ?? {};\nconst execution = src.execution ?? {};\nconst workflow = src.workflow ?? {};\n\n// The stack trace is deliberately dropped. It is in the n8n execution already,\n// and it is the most likely place for a connection string to appear.\nconst message = clip(redact(execution.error?.message ?? 'Workflow failed with no error message'));\nconst failedNode = execution.lastNodeExecuted ?? '';\n\nreturn [\n  {\n    json: {\n      execution_id: execution.id === undefined || execution.id === null ? '' : String(execution.id),\n      execution_url: execution.url ?? '',\n      execution_mode: execution.mode ?? '',\n      retry_of: execution.retryOf ?? null,\n      workflow_id: workflow.id ?? '',\n      workflow_name: workflow.name ?? '',\n      failed_node: failedNode,\n      error_message: message,\n      // What goes into agent_runs.error.\n      error: failedNode ? failedNode + ': ' + message : message,\n      failed_at: new Date().toISOString(),\n    },\n  },\n];\n"
+        "jsCode": "// Shape the failure for the audit trail and for whatever alerting is wired up\n// later. This node talks to nothing outside the host and never retries the\n// workflow that failed - see the WF-99 row in docs/workflows.md.\n\nconst MAX_MESSAGE = 500;\n\n// Credentials must never reach an alert or the audit trail (docs/security.md).\n// Order matters. The scheme rules (Bearer/Basic/Token) must run before the\n// generic key=value rule: otherwise the generic rule consumes the word \"Bearer\"\n// as if it were the value and leaves the actual token in the message.\nfunction redact(text) {\n  if (typeof text !== 'string') return '';\n  return text\n    .replace(/\\b([a-z][a-z0-9+.-]*):\\/\\/([^:\\s/@]+):([^@\\s]+)@/gi, '$1://$2:***@')\n    .replace(/\\beyJ[A-Za-z0-9._-]{16,}/g, '***jwt***')\n    .replace(/\\b(Bearer|Basic|Token)\\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 ***')\n    .replace(\n      /\\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)(?:(?:Bearer|Basic|Token)\\s+)?(\"?)[^\\s,;\"')]+\\3/gi,\n      '$1$2***',\n    );\n}\n\nfunction clip(text) {\n  return text.length > MAX_MESSAGE ? text.slice(0, MAX_MESSAGE) + ' ... [truncated]' : text;\n}\n\n// The deduplication identity for this failure (0011_notifications.sql).\n//\n// A schedule that fails every 15 minutes must produce ONE alert, not 96, and\n// the thing that makes two failures \"the same\" is the workflow, the node and\n// the shape of the message - never the message itself. A timeout that names a\n// different company, or a row count that ticks up, is the same fault. So the\n// message is reduced to a fingerprint: identifiers and numbers out, structure\n// left in.\nfunction fingerprint(text) {\n  return String(text)\n    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')\n    .replace(/\\b\\d[\\d.,:]*/g, '<n>')\n    .replace(/\\s+/g, ' ')\n    .trim()\n    .slice(0, 160);\n}\n\nconst src = $input.first().json ?? {};\nconst execution = src.execution ?? {};\nconst workflow = src.workflow ?? {};\n\n// The stack trace is deliberately dropped. It is in the n8n execution already,\n// and it is the most likely place for a connection string to appear.\nconst message = clip(redact(execution.error?.message ?? 'Workflow failed with no error message'));\nconst failedNode = execution.lastNodeExecuted ?? '';\n\nreturn [\n  {\n    json: {\n      execution_id: execution.id === undefined || execution.id === null ? '' : String(execution.id),\n      execution_url: execution.url ?? '',\n      execution_mode: execution.mode ?? '',\n      retry_of: execution.retryOf ?? null,\n      workflow_id: workflow.id ?? '',\n      workflow_name: workflow.name ?? '',\n      failed_node: failedNode,\n      error_message: message,\n      // What goes into agent_runs.error.\n      error: failedNode ? failedNode + ': ' + message : message,\n      dedup_key: 'agent_failure:' + (workflow.id ?? 'unknown') + ':' +\n        (failedNode || 'unknown') + ':' + fingerprint(message),\n      failed_at: new Date().toISOString(),\n    },\n  },\n];\n"
       },
       "id": "b9000000-0000-4000-8000-000000000002",
       "name": "Error Context",
@@ -27,7 +27,7 @@
         180,
         300
       ],
-      "notes": "Redacts credentials and truncates. Drops the stack trace on purpose."
+      "notes": "Redacts credentials, truncates, drops the stack trace on purpose, and builds the deduplication fingerprint."
     },
     {
       "parameters": {
@@ -108,7 +108,7 @@
             {
               "id": "e09",
               "name": "delivery",
-              "value": "not_configured (TELEGRAM_ENABLED=false)",
+              "value": "notifications outbox (delivered by WF-10 when Telegram is configured)",
               "type": "string"
             }
           ]
@@ -123,7 +123,31 @@
         660,
         300
       ],
-      "notes": "Ready-made alert text. Adding Telegram later is one node on the end of this, not a redesign."
+      "notes": "Ready-made alert text. Queue Alert puts it in the outbox; delivery is WF-10's problem, not this workflow's."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Queue the failure for delivery, deduplicated.\n--\n-- docs/workflows.md requires this on WF-99: \"deduplicated so one broken\n-- schedule does not send 96 messages a day\". The rule itself lives in\n-- queue_notification (0011_notifications.sql) so that every workflow gets the\n-- same behaviour and none of them can opt out of it by mistake.\n--\n-- This node must not be able to fail the error handler. It writes one row with\n-- no joins and no casts that can throw; WF-99 has no error workflow of its own\n-- on purpose, so a failure here would be silent.\nSELECT q.notification_id,\n       q.status,\n       q.occurrences,\n       q.deduplicated,\n       $1::jsonb ->> 'dedup_key' AS dedup_key\nFROM queue_notification(\n         'agent_failure',\n         $1::jsonb ->> 'dedup_key',\n         $1::jsonb ->> 'title',\n         $1::jsonb ->> 'body',\n         'immediate',\n         $1::jsonb -> 'payload',\n         NULL,\n         NULL,\n         make_interval(mins => ($1::jsonb ->> 'cooloff_minutes')::int)\n     ) q;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ dedup_key: $('Error Context').first().json.dedup_key, title: 'Workflow failed: ' + ($('Error Context').first().json.workflow_name || 'unknown'), body: $json.alert + '\\n\\nExecution ' + ($json.execution_id || '?') + (($json.agent_runs_closed || 0) > 0 ? ' — ' + $json.agent_runs_closed + ' agent run(s) closed as error' : '') + ($json.execution_url ? '\\n' + $json.execution_url : ''), payload: { workflow_id: $('Error Context').first().json.workflow_id, workflow_name: $json.workflow_name, failed_node: $json.failed_node, execution_id: $json.execution_id, execution_url: $json.execution_url, agent_runs_closed: $json.agent_runs_closed, failed_at: $json.failed_at }, cooloff_minutes: Number($env.ALERT_COOLOFF_MINUTES || 60) } ) }}"
+        }
+      },
+      "id": "b9000000-0000-4000-8000-000000000005",
+      "name": "Queue Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Deduplicated in the database. A schedule failing every 15 minutes produces one alert, with a count."
     }
   ],
   "connections": {
@@ -154,6 +178,17 @@
         [
           {
             "node": "Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Payload": {
+      "main": [
+        [
+          {
+            "node": "Queue Alert",
             "type": "main",
             "index": 0
           }

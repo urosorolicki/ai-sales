@@ -1,6 +1,9 @@
 # Telegram control plane
 
-**Status: Phase 3. Not implemented.** This document specifies it.
+**Status: notifications are built, commands are not.** WF-10 delivers everything
+in the notification outbox (`docs/notifications.md`); nothing yet reads a message
+*from* Telegram, so none of the commands below work. This document specifies the
+whole thing and marks what exists.
 
 Telegram is the only human interface. There is no web UI and there should not
 be one: the interactions are approve, reject, pause and look at a number, and
@@ -8,9 +11,23 @@ all four work better from a phone than from a dashboard nobody opens.
 
 ## Setup
 
-1. Create a bot with `@BotFather`, take the token into `TELEGRAM_BOT_TOKEN`.
-2. Send the bot a message, read the chat id, put it in `TELEGRAM_CHAT_ID`.
-3. Set `TELEGRAM_ENABLED=true`.
+1. Create a bot with `@BotFather` and copy the token.
+2. In the n8n UI, **Credentials > New > Telegram API**, paste the token, and name
+   it exactly **`Telegram account`**. WF-10's Send Telegram node already points
+   at that name.
+   The token deliberately does **not** go into `TELEGRAM_BOT_TOKEN`. An HTTP node
+   would put it in the URL of every saved execution; a credential is encrypted by
+   n8n and redacted from execution data. `docs/security.md` forbids the first.
+3. Send the bot a message, read the chat id, put it in `TELEGRAM_CHAT_ID`, and
+   set `TELEGRAM_ENABLED=true`. WF-10 claims nothing at all until both are set.
+
+Before the first delivery, look at what is already queued - otherwise the first
+pass sends the entire backlog in one go:
+
+```sql
+SELECT kind, priority, occurrences, first_seen_at, title
+FROM v_pending_notifications;
+```
 
 ## Authorisation
 
@@ -24,6 +41,9 @@ recorded with the chat id and timestamp, because "who approved this" is a
 question that gets asked after something goes wrong.
 
 ## Commands
+
+**None of these are implemented.** They need a Telegram Trigger and the chat id
+check above, and neither exists yet.
 
 | Command | Does | Reads |
 |---|---|---|
@@ -47,7 +67,9 @@ Later, once the earlier phases have earned it:
 
 ## Approval flow
 
-WF-05 produces a draft and sends one message:
+WF-05 produces a draft and queues one message. **Built**, except the last line:
+`Queue Draft Alert` composes this from `v_approval_queue`, so it describes the
+row that was actually written rather than what the workflow believes it wrote.
 
 ```
 [HIGH_PRIORITY 78]  Example Scaleup  (example.org)
@@ -63,8 +85,14 @@ Your platform engineer role has been open since July and the
 description says the EKS migration is already underway.
 ...
 
-/approve 7f3a   /reject 7f3a
+id 7f3a  ·  approve and reject still happen in the database; the
+Telegram commands are not built yet
 ```
+
+The last line is not what this document specifies, on purpose. Printing
+`/approve 7f3a` when nothing handles it is worse than printing nothing: it reads
+as a working control. It goes back to `/approve 7f3a   /reject 7f3a` when the
+commands exist.
 
 Design rules for that message, all of which exist because the alternative was
 tried by someone else and failed:
@@ -80,19 +108,22 @@ tried by someone else and failed:
 
 ## Notifications
 
-| Event | Priority | Content |
-|---|---|---|
-| Positive reply | Immediate | Company, person, the reply, the thread, the research |
-| Conversation escalated | Immediate | Why it escalated and the full thread |
-| Company reaches `HOT` | Immediate | Company, score, the signals that got it there |
-| Draft ready for approval | Batched | The approval message above |
-| Daily report | Once a day | `v_daily_stats` |
-| Agent failure | Deduplicated | What failed, how many times, when it started |
+| Event | Priority | Content | Status |
+|---|---|---|---|
+| Positive reply | Immediate | Company, person, the reply, the thread, the research | needs WF-08 |
+| Conversation escalated | Immediate | Why it escalated and the full thread | needs WF-09 |
+| Company reaches `HOT` | Immediate | Company, score, the signals that got it there | **built** (WF-04) |
+| Draft ready for approval | Batched | The approval message above | **built** (WF-05), one message per draft |
+| Daily report | Once a day | `v_daily_stats` | **built** (WF-100) |
+| Agent failure | Deduplicated | What failed, how many times, when it started | **built** (WF-99, WF-101) |
 
 Deduplication matters more than it sounds like it does. A schedule that runs
 every 15 minutes and fails every time will send 96 identical messages in a day,
 and the result is that all Telegram notifications get muted - including the
 positive reply.
+
+It is enforced in the database, in `queue_notification()`, so no workflow can
+skip it. `docs/notifications.md` has the rule and the four cases.
 
 ## What Telegram must never do
 
@@ -102,4 +133,7 @@ positive reply.
 - **Never accept a command from an unknown chat id.**
 - **Never include credentials, API keys or full error payloads** in a message.
 - **Never be the only record.** Everything a command does is a database state
-  change, so the state survives Telegram being unavailable.
+  change, so the state survives Telegram being unavailable. This is why
+  notifications are a table that WF-10 drains rather than a send at the point
+  the event happens: WF-04 does not lose a HOT company because a bot token is
+  missing.

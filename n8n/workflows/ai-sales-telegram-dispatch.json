@@ -1,0 +1,292 @@
+{
+  "id": "wf10TelegramDispatch",
+  "name": "AI Sales — WF-10 Telegram Dispatch",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -140,
+        300
+      ],
+      "notes": "The outbox is drained on a schedule. Nothing calls this workflow directly."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "t10-1",
+              "leftValue": "={{ $env.TELEGRAM_ENABLED === 'true' && !!$env.TELEGRAM_CHAT_ID }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Telegram Configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        100,
+        300
+      ],
+      "notes": "Checked before anything is claimed, so an unconfigured install never leaves rows at 'sending'."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claim a batch of undelivered notifications.\n--\n-- 'sending' is the claim. FOR UPDATE SKIP LOCKED stops two overlapping runs\n-- taking the same row, and the stale-'sending' clause is the recovery path for\n-- a run that died between claiming and marking: after the timeout the row is\n-- claimable again, exactly like the 15 minute window WF-04 uses on agent_runs.\n--\n-- attempts is incremented at claim time, not at delivery time. A row that kills\n-- the workflow every time it is tried must still run out of attempts, or it\n-- blocks the queue forever.\n--\n-- The parameters are read straight off $1 rather than through a CTE: LIMIT may\n-- not reference a variable, so \"LIMIT (SELECT ... FROM params)\" is rejected.\nWITH claimed AS (\n    UPDATE notifications\n    SET status   = 'sending',\n        attempts = notifications.attempts + 1\n    WHERE notifications.id IN (\n        SELECT n.id\n        FROM notifications n\n        WHERE n.attempts < ($1::jsonb ->> 'max_attempts')::int\n          AND (\n                n.status = 'pending'\n                -- A retry waits longer each time. Without this the schedule\n                -- burns all five attempts in twenty-five minutes, so a Telegram\n                -- outage shorter than lunch is enough to drop the day's\n                -- notifications on the floor.\n             OR (n.status = 'failed'\n                 AND n.updated_at < now() - make_interval(\n                         mins => n.attempts * ($1::jsonb ->> 'retry_backoff_minutes')::int))\n             OR (n.status = 'sending'\n                 AND n.updated_at < now() - make_interval(mins => ($1::jsonb ->> 'stale_minutes')::int))\n          )\n        ORDER BY CASE n.priority WHEN 'immediate' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,\n                 n.first_seen_at\n        LIMIT ($1::jsonb ->> 'batch_size')::int\n        FOR UPDATE SKIP LOCKED\n    )\n    RETURNING notifications.id, notifications.kind, notifications.priority,\n              notifications.dedup_key, notifications.title, notifications.body,\n              notifications.occurrences, notifications.attempts,\n              notifications.first_seen_at, notifications.last_seen_at,\n              notifications.company_id\n)\nSELECT c.id AS notification_id,\n       c.kind,\n       c.priority,\n       c.dedup_key,\n       c.title,\n       c.body,\n       c.occurrences,\n       c.attempts,\n       c.first_seen_at,\n       c.last_seen_at,\n       co.name         AS company_name,\n       co.domain::text AS company_domain\nFROM claimed c\nLEFT JOIN companies co ON co.id = c.company_id\nORDER BY CASE c.priority WHEN 'immediate' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,\n         c.first_seen_at;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ batch_size: Number($env.NOTIFY_BATCH_SIZE || 10), max_attempts: Number($env.NOTIFY_MAX_ATTEMPTS || 5), retry_backoff_minutes: Number($env.NOTIFY_RETRY_BACKOFF_MINUTES || 10), stale_minutes: Number($env.NOTIFY_STALE_CLAIM_MINUTES || 10) } ) }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Claim Notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        360,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Zero rows is the normal case and stops the run here - n8n does not run downstream nodes on an empty output."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Render one notification as plain Telegram text.\n//\n// No parse_mode. Markdown and HTML both need escaping, and the text here\n// contains company names, error messages and URLs written by other systems. A\n// missed escape either breaks the send or silently drops part of the message,\n// and a dropped line in an alert is worse than an unstyled one.\n\nconst TELEGRAM_LIMIT = 4096;\nconst MARGIN = 96; // room for the header and the truncation marker\n\nfunction ago(ts) {\n  if (!ts) return '';\n  const minutes = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));\n  if (minutes < 60) return minutes + 'm';\n  if (minutes < 1440) return Math.round(minutes / 60) + 'h';\n  return Math.round(minutes / 1440) + 'd';\n}\n\nreturn $input.all().map((item) => {\n  const n = item.json ?? {};\n  const head = [];\n\n  head.push(String(n.title ?? '(no title)'));\n\n  // docs/telegram.md wants \"what failed, how many times, when it started\" on a\n  // deduplicated alert. occurrences = 1 means it fired once; saying so would be\n  // noise, so the line only appears when it adds something.\n  if (Number(n.occurrences) > 1) {\n    head.push('(' + n.occurrences + ' times, first ' + ago(n.first_seen_at) + ' ago)');\n  }\n  if (n.company_name) {\n    head.push(n.company_name + (n.company_domain ? ' (' + n.company_domain + ')' : ''));\n  }\n\n  const header = head.join('\\n');\n  let body = String(n.body ?? '');\n  const room = TELEGRAM_LIMIT - MARGIN - header.length;\n  let truncated = false;\n  if (body.length > room) {\n    body = body.slice(0, Math.max(0, room));\n    truncated = true;\n  }\n\n  const text = header + '\\n\\n' + body + (truncated ? '\\n\\n[truncated]' : '');\n\n  return {\n    json: {\n      notification_id: n.notification_id,\n      dedup_key: n.dedup_key,\n      kind: n.kind,\n      priority: n.priority,\n      attempts: n.attempts,\n      text,\n      text_length: text.length,\n      truncated,\n    },\n  };\n});\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        200
+      ],
+      "notes": "Plain text on purpose. No parse_mode means no escaping bug can drop a line from an alert."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "notes": "The bot token lives in the n8n credential, never in this file and never in an execution URL.",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide sent or failed for each message, and make the reason safe to store.\n//\n// The Telegram node continues on error, so a refused send arrives as an item\n// with an error rather than as a failed execution. That is deliberate: a\n// failed execution would abandon the claim and leave the row at 'sending'\n// until the stale timeout, and it would hand a credential-bearing error to\n// WF-99.\n//\n// Redaction is the same rule as WF-99 with one addition: a bot token is\n// <digits>:<base64ish>, and it appears verbatim in Telegram's own error URLs.\n// Order matters here exactly as it does in WF-99 - the scheme rules run before\n// the generic key=value rule, or the generic rule eats the word \"Bearer\" and\n// leaves the token behind.\n//\n// The bot token pattern deliberately has no \\\\b in front of it. The string that\n// actually shows up is \".../bot8123456789:AAH...\", and there is no word boundary\n// between the \"t\" of \"bot\" and the first digit, so an anchored pattern matches\n// nothing and the whole token goes into the database. Caught by the test below,\n// not by reading the code.\nconst MAX_ERROR = 300;\n\nfunction redact(text) {\n  if (typeof text !== 'string') return '';\n  return text\n    .replace(/\\d{6,12}:[A-Za-z0-9_-]{30,}/g, '***bot-token***')\n    .replace(/\\b([a-z][a-z0-9+.-]*):\\/\\/([^:\\s/@]+):([^@\\s]+)@/gi, '$1://$2:***@')\n    .replace(/\\beyJ[A-Za-z0-9._-]{16,}/g, '***jwt***')\n    .replace(/\\b(Bearer|Basic|Token)\\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 ***')\n    .replace(\n      /\\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)(?:(?:Bearer|Basic|Token)\\s+)?(\"?)[^\\s,;\"')]+\\3/gi,\n      '$1$2***',\n    );\n}\n\nfunction clip(text) {\n  return text.length > MAX_ERROR ? text.slice(0, MAX_ERROR) + ' ... [truncated]' : text;\n}\n\n// The Telegram node emits one output item per input item, so the notification\n// each result belongs to is read back from Format Message by index rather than\n// from the response, which does not carry it.\nconst sent = $input.all();\nconst queued = $('Format Message').all();\n\nreturn sent.map((item, i) => {\n  const source = queued[i]?.json ?? {};\n  const res = item.json ?? {};\n\n  const rawError = res.error\n    ? (typeof res.error === 'string' ? res.error : (res.error.message ?? JSON.stringify(res.error)))\n    : null;\n\n  // A successful sendMessage returns the message it created. Anything without\n  // a message_id is treated as a failure, including an empty response: the\n  // point of this workflow is knowing whether the human was actually told.\n  const messageId = res.message_id ?? res.result?.message_id ?? null;\n  const delivered = rawError === null && messageId !== null;\n\n  return {\n    json: {\n      notification_id: source.notification_id,\n      dedup_key: source.dedup_key,\n      delivered,\n      telegram_message_id: messageId === null ? '' : String(messageId),\n      // When the node cannot start at all - a missing or wrong credential is the\n      // case seen in practice - n8n emits an empty item with no error on it, so\n      // there is nothing to quote. Naming the likely cause is the difference\n      // between this line being actionable and it sending the reader to look at\n      // Telegram's status page.\n      error: delivered\n        ? ''\n        : clip(redact(rawError ??\n            'Telegram returned no message id, so there is no evidence the message was sent. ' +\n            'The usual cause is a missing or wrong Telegram credential on the Send Telegram node.')),\n    },\n  };\n});\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Delivery Outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        200
+      ],
+      "notes": "Redacts before anything is stored. A bot token is a credential and Telegram puts it in its own errors."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Close out one delivery. A failure goes back to 'failed', which the outbox\n-- index still covers, so the next pass retries it until attempts runs out.\n-- After that it stays 'failed' and WF-101 reports it: nothing is lost, but\n-- nobody is told twice either.\nUPDATE notifications\nSET status  = CASE WHEN ($1::jsonb ->> 'delivered')::boolean THEN 'sent' ELSE 'failed' END,\n    sent_at = CASE WHEN ($1::jsonb ->> 'delivered')::boolean THEN now() ELSE sent_at END,\n    -- The failed status has a CHECK that demands a message, so this must never\n    -- resolve to NULL on the failure branch.\n    error   = CASE\n                  WHEN ($1::jsonb ->> 'delivered')::boolean THEN NULL\n                  ELSE COALESCE(NULLIF($1::jsonb ->> 'error', ''), 'delivery failed with no message')\n              END\nWHERE id = ($1::jsonb ->> 'notification_id')::uuid\nRETURNING id AS notification_id, status, attempts, sent_at, error;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ notification_id: $json.notification_id, delivered: $json.delivered, error: $json.error } ) }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Mark Delivered",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1400,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "The notifications table is the record of what the human was told."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "nc1",
+              "name": "delivered",
+              "value": "={{ 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "nc2",
+              "name": "reason",
+              "value": "TELEGRAM_ENABLED is not true, or TELEGRAM_CHAT_ID is empty",
+              "type": "string"
+            },
+            {
+              "id": "nc3",
+              "name": "note",
+              "value": "Notifications keep accumulating in the notifications table. Nothing is lost; nothing is sent.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Not Configured",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        360,
+        420
+      ],
+      "notes": "Not an error. docs/telegram.md: Telegram must never be the only record."
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Telegram Configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Configured?": {
+      "main": [
+        [
+          {
+            "node": "Claim Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not Configured",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Notifications": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Telegram": {
+      "main": [
+        [
+          {
+            "node": "Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delivery Outcome": {
+      "main": [
+        [
+          {
+            "node": "Mark Delivered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "errorWorkflow": "wf99ErrorHandler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

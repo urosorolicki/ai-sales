@@ -15,8 +15,28 @@ Every Hour
        +-- no  -> Close Run Error
        +-- yes -> Passed Checks?
                     +-- yes -> Queue For Approval        (outreach + lead to pending_approval)
+                    |            +-> Queue Draft Alert   (the approval message, second branch)
                     +-- no  -> Store Blocked Or Skipped  (draft kept with the reason, or lead to nurture)
 ```
+
+## The approval message
+
+A queued draft also queues the notification `docs/telegram.md` specifies, with
+the hook and its source **above** the email body - the one thing worth checking
+is whether the claim is true, and that takes five seconds when the link is at the
+top - and the whole body, because an approval on a summary is not an approval.
+
+Everything except the hook is read back out of `v_approval_queue`, so the message
+describes the row that was actually written rather than what the workflow
+believes it wrote. If the draft is not there at `pending_approval`, the query
+returns no rows and nothing is queued: a refused write, not a silent success.
+
+It hangs off `Queue For Approval` as a **second branch**. `Close Run Success`
+resolves `$('Validate And Check').item` by paired item, and inserting a node into
+that chain would break the lineage. The audit trail must not depend on a
+notification succeeding.
+
+`docs/notifications.md` has the delivery half.
 
 ## The checks are mechanical
 

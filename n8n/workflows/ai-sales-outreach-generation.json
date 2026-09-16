@@ -377,6 +377,30 @@
           "name": "Postgres account"
         }
       }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Queue the approval message described in docs/telegram.md.\n--\n-- The layout is not arbitrary and the comments in that document explain each\n-- rule: the hook and its source come BEFORE the body, because the one thing\n-- worth checking is whether the claim is true and that takes five seconds if\n-- the link is at the top; and the whole body is shown, because an approval on\n-- a summary is not an approval.\n--\n-- Everything except the hook is read from v_approval_queue, so the message\n-- describes the row that was actually written, not what the workflow believes\n-- it wrote. The hook comes in as a parameter because it lives in the agent's\n-- output rather than in the outreach row.\n--\n-- Zero rows out means the draft was not found at pending_approval and nothing\n-- is queued. That is a refused write, not a silent success.\nWITH q AS (\n    SELECT *\n    FROM v_approval_queue\n    WHERE outreach_id = ($1::jsonb ->> 'outreach_id')::uuid\n),\ncomposed AS (\n    SELECT q.outreach_id,\n           q.lead_id,\n           q.company_id,\n           'Draft ready: ' || q.company_name || ' — ' || q.full_name AS title,\n           '[' || q.score_band || ' ' || COALESCE(q.score::text, '?') || ']  '\n               || q.company_name || '  (' || q.domain || ')'\n           || E'\\n' || q.full_name || COALESCE(', ' || q.title, '')\n           || E'\\n' || 'Offer: ' || COALESCE(q.recommended_offer, 'none')\n           || E'\\n\\n' || 'Hook: '   || COALESCE(NULLIF($1::jsonb ->> 'hook_fact',   ''), '(none recorded)')\n           || E'\\n'   || 'Source: ' || COALESCE(NULLIF($1::jsonb ->> 'hook_source', ''), '(none recorded)')\n           || E'\\n\\n' || 'Subject: ' || COALESCE(q.subject, '(none)')\n           || E'\\n\\n' || q.body\n           -- docs/telegram.md specifies /approve and /reject here. They are not\n           -- built yet, and printing a command that does nothing would be worse\n           -- than printing none, so the id is given and the gap is stated.\n           || E'\\n\\n' || 'id ' || left(q.outreach_id::text, 4)\n               || '  ·  approve and reject still happen in the database; the Telegram commands are not built yet'\n               AS body\n    FROM q\n)\nSELECT n.notification_id, n.status, n.occurrences, n.deduplicated,\n       composed.outreach_id, composed.lead_id\nFROM composed\nCROSS JOIN LATERAL queue_notification(\n    'draft_ready',\n    'draft_ready:' || composed.outreach_id,\n    composed.title,\n    composed.body,\n    -- Batched: a draft is not an emergency, and docs/telegram.md puts it in the\n    -- batched row of its notification table.\n    'batched',\n    jsonb_build_object('outreach_id', composed.outreach_id, 'lead_id', composed.lead_id),\n    composed.company_id,\n    composed.lead_id,\n    interval '7 days'\n) n;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({ outreach_id: $json.outreach_id, hook_fact: $('Validate And Check').item.json.draft.hook_fact, hook_source: $('Validate And Check').item.json.draft.hook_source } ) }}"
+        }
+      },
+      "id": "c0500000-0000-4000-8000-000000000001",
+      "name": "Queue Draft Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1640,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "vUxYVHnmuty8Jcgk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "A second branch off Queue For Approval. The scoring path must not depend on a notification succeeding."
     }
   ],
   "connections": {
@@ -520,6 +544,11 @@
         [
           {
             "node": "Close Run Success",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Queue Draft Alert",
             "type": "main",
             "index": 0
           }

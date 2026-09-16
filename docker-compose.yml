@@ -104,8 +104,54 @@ services:
       EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
       EXECUTIONS_DATA_SAVE_ON_ERROR: all
 
+      # Everything a workflow reads through $env has to be listed here. A
+      # variable that is only in .env reaches docker compose and stops there;
+      # inside n8n it is simply undefined, and `$env.X || 5` quietly uses 5.
+      # That is how the three model variables below went unnoticed: the
+      # fallbacks in the workflows matched .env, so the pipeline ran on the
+      # right models for the wrong reason and changing .env would have done
+      # nothing. The defaults here repeat the ones in the workflows on purpose,
+      # so that a missing .env still starts and the two cannot drift apart
+      # silently.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      OLLAMA_RESEARCH_MODEL: ${OLLAMA_RESEARCH_MODEL:-qwen9-64k:latest}
+      OLLAMA_SCORING_MODEL: ${OLLAMA_SCORING_MODEL:-qwen9-64k:latest}
+      OLLAMA_OUTREACH_MODEL: ${OLLAMA_OUTREACH_MODEL:-qwen9-64k:latest}
+
+      # Telegram. TELEGRAM_BOT_TOKEN is deliberately absent: WF-10 sends through
+      # the n8n Telegram credential, so the token never becomes an environment
+      # variable or part of an execution URL. See docs/telegram.md.
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-false}"
+
+      # Notification outbox (WF-10), see docs/notifications.md.
+      NOTIFY_BATCH_SIZE: ${NOTIFY_BATCH_SIZE:-10}
+      NOTIFY_MAX_ATTEMPTS: ${NOTIFY_MAX_ATTEMPTS:-5}
+      NOTIFY_RETRY_BACKOFF_MINUTES: ${NOTIFY_RETRY_BACKOFF_MINUTES:-10}
+      NOTIFY_STALE_CLAIM_MINUTES: ${NOTIFY_STALE_CLAIM_MINUTES:-10}
+      ALERT_COOLOFF_MINUTES: ${ALERT_COOLOFF_MINUTES:-60}
+      HOT_ALERT_COOLOFF_DAYS: ${HOT_ALERT_COOLOFF_DAYS:-30}
+
+      # Agent health thresholds (WF-101).
+      HEALTH_ERROR_RATE_THRESHOLD: ${HEALTH_ERROR_RATE_THRESHOLD:-0.25}
+      HEALTH_ERROR_RATE_MIN_RUNS: ${HEALTH_ERROR_RATE_MIN_RUNS:-3}
+      HEALTH_STUCK_RUN_MINUTES: ${HEALTH_STUCK_RUN_MINUTES:-15}
+      HEALTH_ORPHAN_RESEARCH_MINUTES: ${HEALTH_ORPHAN_RESEARCH_MINUTES:-120}
+      HEALTH_STALLED_QUEUE_HOURS: ${HEALTH_STALLED_QUEUE_HOURS:-6}
+      HEALTH_ALERT_COOLOFF_MINUTES: ${HEALTH_ALERT_COOLOFF_MINUTES:-360}
+
+      # Research pass (WF-02).
+      RESEARCH_BATCH_SIZE: ${RESEARCH_BATCH_SIZE:-5}
+      RESEARCH_CANDIDATE_POOL: ${RESEARCH_CANDIDATE_POOL:-25}
+      RESEARCH_DOMAIN_COOLDOWN_MINUTES: ${RESEARCH_DOMAIN_COOLDOWN_MINUTES:-60}
+      RESEARCH_FETCH_BATCH_SIZE: ${RESEARCH_FETCH_BATCH_SIZE:-1}
+      RESEARCH_FETCH_BATCH_INTERVAL_MS: ${RESEARCH_FETCH_BATCH_INTERVAL_MS:-1000}
+
+      # Scoring and outreach.
+      RESCORE_AFTER_DAYS: ${RESCORE_AFTER_DAYS:-7}
+      RESCORE_BATCH_SIZE: ${RESCORE_BATCH_SIZE:-50}
+      OUTREACH_MIN_SCORE: ${OUTREACH_MIN_SCORE:-60}
     # Ollama runs natively on the host, not in a container: Docker Desktop on
     # macOS gives a container no Metal access, so an Ollama container is CPU-only
     # on a machine with a perfectly good GPU. Mapping the name "ollama" to the

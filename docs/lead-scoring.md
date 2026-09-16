@@ -88,13 +88,31 @@ must not be able to fail a research run.
 
 ## Leads
 
-A lead needs a person, and `people` is filled by WF-03, which does not exist. So
-today WF-04 writes scores and creates no leads, which is the documented outcome
-of "no contactable person" rather than a bug. The note lands in
-`agent_runs.output.notes`.
+A lead needs a person **with a usable address**. WF-03 writes people it found
+named on a team page with no address at all, so "there is a person" and "there
+is somebody to write to" are different questions.
 
-When people do exist, the insert is `ON CONFLICT (company_id, person_id) DO
-UPDATE`, so re-scoring moves a lead's score instead of duplicating it.
+Without the address check the lead would still be created, WF-05 would draft for
+it, and the draft would reach `pending_approval` with no recipient:
+`is_suppressed(NULL)` is false and the trigger on `outreach` has nothing to
+compare. The check belongs here, where the lead is created.
+
+The recipient is chosen deliberately rather than taken first, because the order
+`people` comes back in means nothing:
+
+1. **Is this a decision maker at all.** A published address on a junior engineer
+   is still the wrong person to write to.
+2. **How the address was obtained.** `docs/security.md` treats a bounce as
+   unrecoverable damage to the sending domain, so a published address beats one
+   this system derived.
+3. **Seniority**, as the tiebreak.
+
+Taking the first row cost a CTO with a published address the lead, which went to
+a VP with a derived one purely by position in the array. That was found by
+running it, not by reading it.
+
+The insert is `ON CONFLICT (company_id, person_id) DO UPDATE`, so re-scoring
+moves a lead's score instead of duplicating it.
 
 ## The nightly sweep
 

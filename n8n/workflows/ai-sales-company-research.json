@@ -240,7 +240,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// One item per fetched page arrives here. Group them back into one item per\n// company and turn the HTML into something worth sending to a model.\n//\n// Everything is capped. An unbounded page is an unbounded bill, and a careers\n// page with a thousand listings is not more informative than the first slice.\n\nconst MAX_CHARS_PER_PAGE = 6000;\nconst MAX_CHARS_TOTAL = 24000;\n\nfunction htmlToText(html) {\n  return String(html)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<!--[\\s\\S]*?-->/g, ' ')\n    .replace(/<\\/(p|div|li|h[1-6]|tr|section|article)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// The HTTP Request node replaces the item json with the response, so the\n// company each page belongs to is read back from Split URLs by index. n8n keeps\n// one output item per input item here, so the indexes line up.\nconst pages = $input.all();\nconst context = $('Split URLs').all();\nconst byCompany = new Map();\n\nfor (let i = 0; i < pages.length; i++) {\n  const j = { ...context[i].json, ...(pages[i].json ?? {}) };\n  const key = j.company_id;\n  if (!key) continue;\n\n  if (!byCompany.has(key)) {\n    byCompany.set(key, {\n      company_id: j.company_id,\n      name: j.name,\n      domain: j.domain,\n      website: j.website,\n      industry: j.industry,\n      base_url: j.base_url,\n      prior_failures: j.prior_failures ?? 0,\n      robots_blocked: j.robots_blocked ?? [],\n      sources: [],\n      fetch_failures: [],\n      sections: [],\n    });\n  }\n  const bucket = byCompany.get(key);\n\n  // An HTTP error or a network failure is evidence of absence, not a crash.\n  const res = pages[i].json ?? {};\n  const failed = res.error !== undefined || typeof res.data !== 'string' || res.data === '';\n  if (failed) {\n    const reason = res.error\n      ? (typeof res.error === 'string' ? res.error : (res.error.message ?? 'request failed'))\n      : 'empty response';\n    bucket.fetch_failures.push(j.url + ' (' + reason + ')');\n    continue;\n  }\n\n  const text = htmlToText(res.data);\n  if (text.length < 40) {\n    bucket.fetch_failures.push(j.url + ' (no usable text)');\n    continue;\n  }\n\n  bucket.sources.push(j.url);\n  bucket.sections.push('### SOURCE: ' + j.url + '\\n' + text.slice(0, MAX_CHARS_PER_PAGE));\n}\n\nconst out = [];\nfor (const bucket of byCompany.values()) {\n  let material = bucket.sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n  const { sections, ...rest } = bucket;\n  out.push({\n    json: {\n      ...rest,\n      material,\n      material_chars: material.length,\n      material_truncated: truncated,\n      pages_fetched: bucket.sources.length,\n      // Playwright is not deployed. A page that needs JavaScript to render is\n      // recorded as unknown rather than silently treated as empty.\n      rendering_unavailable: bucket.sources.length === 0 && bucket.fetch_failures.length > 0,\n    },\n  });\n}\n\nreturn out;\n"
+        "jsCode": "// One item per fetched page arrives here. Group them back into one item per\n// company and turn the HTML into something worth sending to a model.\n//\n// It also harvests job-board links out of the RAW html before the tags are\n// stripped. htmlToText discards the href, and the href is where the board's\n// slug lives, so this has to happen here and cannot be done downstream.\n//\n// Everything is capped. An unbounded page is an unbounded bill, and a careers\n// page with a thousand listings is not more informative than the first slice.\n\nconst ATS_LINK_PATTERNS = [\n  ['greenhouse', /(?:boards|job-boards)\\.greenhouse\\.io\\/(?:embed\\/job_board\\?for=)?([a-z0-9_-]+)/gi],\n  ['ashby',      /jobs\\.ashbyhq\\.com\\/([a-z0-9_-]+)/gi],\n  ['lever',      /jobs\\.lever\\.co\\/([a-z0-9_-]+)/gi],\n  ['workable',   /apply\\.workable\\.com\\/([a-z0-9_-]+)/gi],\n  ['recruitee',  /([a-z0-9_-]+)\\.recruitee\\.com/gi],\n  ['teamtailor', /([a-z0-9_-]+)\\.teamtailor\\.com/gi],\n  ['personio',   /([a-z0-9_-]+)\\.jobs\\.personio\\.(?:de|com)/gi],\n  ['smartrecruiters', /careers\\.smartrecruiters\\.com\\/([a-z0-9_-]+)/gi],\n];\n\n// Slugs that match a pattern but are not a company.\nconst SLUG_DENYLIST = new Set([\n  'embed', 'job_board', 'www', 'api', 'jobs', 'careers', 'boards', 'app', 'static', 'assets',\n]);\n\n// Harvest (provider, slug) pairs out of raw HTML. Runs on the un-stripped page:\n// htmlToText throws the href away, which is where the slug lives.\nfunction harvestAtsLinks(html) {\n  const found = [];\n  const text = String(html);\n  for (const [provider, re] of ATS_LINK_PATTERNS) {\n    re.lastIndex = 0;\n    let m;\n    while ((m = re.exec(text)) !== null) {\n      const slug = (m[1] || '').toLowerCase();\n      if (!slug || SLUG_DENYLIST.has(slug) || slug.length < 2) continue;\n      found.push({ provider, slug, via: 'link' });\n      if (found.length > 12) return found;\n    }\n  }\n  return found;\n}\n\n// A company's candidate boards: links seen on its own pages first, because a\n// published link beats a guess, then slugs derived from the domain.\n\nconst MAX_CHARS_PER_PAGE = 6000;\nconst MAX_CHARS_TOTAL = 24000;\n\nfunction htmlToText(html) {\n  return String(html)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<!--[\\s\\S]*?-->/g, ' ')\n    .replace(/<\\/(p|div|li|h[1-6]|tr|section|article)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// The HTTP Request node replaces the item json with the response, so the\n// company each page belongs to is read back from Split URLs by index. n8n keeps\n// one output item per input item here, so the indexes line up.\nconst pages = $input.all();\nconst context = $('Split URLs').all();\nconst byCompany = new Map();\n\nfor (let i = 0; i < pages.length; i++) {\n  const j = { ...context[i].json, ...(pages[i].json ?? {}) };\n  const key = j.company_id;\n  if (!key) continue;\n\n  if (!byCompany.has(key)) {\n    byCompany.set(key, {\n      company_id: j.company_id,\n      name: j.name,\n      domain: j.domain,\n      website: j.website,\n      industry: j.industry,\n      base_url: j.base_url,\n      prior_failures: j.prior_failures ?? 0,\n      robots_blocked: j.robots_blocked ?? [],\n      sources: [],\n      fetch_failures: [],\n      sections: [],\n      ats_hints: [],\n    });\n  }\n  const bucket = byCompany.get(key);\n\n  // An HTTP error or a network failure is evidence of absence, not a crash.\n  const res = pages[i].json ?? {};\n  const failed = res.error !== undefined || typeof res.data !== 'string' || res.data === '';\n  if (failed) {\n    const reason = res.error\n      ? (typeof res.error === 'string' ? res.error : (res.error.message ?? 'request failed'))\n      : 'empty response';\n    bucket.fetch_failures.push(j.url + ' (' + reason + ')');\n    continue;\n  }\n\n  const text = htmlToText(res.data);\n  if (text.length < 40) {\n    bucket.fetch_failures.push(j.url + ' (no usable text)');\n    continue;\n  }\n\n  // Read the links off the raw markup, not off `text`.\n  for (const hint of harvestAtsLinks(res.data)) {\n    if (!bucket.ats_hints.some((h) => h.provider === hint.provider && h.slug === hint.slug)) {\n      bucket.ats_hints.push(hint);\n    }\n  }\n\n  bucket.sources.push(j.url);\n  bucket.sections.push('### SOURCE: ' + j.url + '\\n' + text.slice(0, MAX_CHARS_PER_PAGE));\n}\n\nconst out = [];\nfor (const bucket of byCompany.values()) {\n  let material = bucket.sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n  const { ...rest } = bucket;\n  out.push({\n    json: {\n      // `sections` and `ats_hints` are carried forward: Merge ATS Material\n      // rebuilds `material` once the job boards have been fetched, and it\n      // cannot do that from an already-joined string.\n      ...rest,\n      material,\n      material_chars: material.length,\n      material_truncated: truncated,\n      pages_fetched: bucket.sources.length,\n      // Playwright is not deployed. A page that needs JavaScript to render is\n      // recorded as unknown rather than silently treated as empty.\n      rendering_unavailable: bucket.sources.length === 0 && bucket.fetch_failures.length > 0,\n    },\n  });\n}\n\nreturn out;\n"
       },
       "id": "c2-06",
       "name": "Group Material",
@@ -265,7 +265,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1140,
+        1740,
         300
       ],
       "credentials": {
@@ -284,7 +284,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1340,
+        1940,
         300
       ],
       "notes": "Short prompt, 4000 characters of material, 256 output tokens. Triage runs for every company, so its cost is paid every time."
@@ -305,7 +305,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        2140,
         300
       ],
       "onError": "continueRegularOutput",
@@ -320,7 +320,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1740,
+        2340,
         300
       ],
       "notes": "Fails open. A broken filter must cost money, never silently discard leads."
@@ -338,7 +338,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1940,
+        2540,
         300
       ],
       "credentials": {
@@ -378,7 +378,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        2140,
+        2740,
         300
       ]
     },
@@ -395,7 +395,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2340,
+        2940,
         560
       ],
       "credentials": {
@@ -449,7 +449,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        2540,
+        3140,
         560
       ]
     },
@@ -466,7 +466,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2340,
+        2940,
         140
       ],
       "credentials": {
@@ -487,7 +487,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2540,
+        3140,
         140
       ],
       "notes": "Prompt and schema are both read from disk, so neither is restated here."
@@ -508,7 +508,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2740,
+        3340,
         140
       ],
       "retryOnFail": true,
@@ -527,7 +527,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2940,
+        3540,
         140
       ],
       "notes": "Drives every check off agents/research/schema.json; also catches truncation."
@@ -562,7 +562,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3140,
+        3740,
         140
       ]
     },
@@ -579,7 +579,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3340,
+        3940,
         40
       ],
       "credentials": {
@@ -603,7 +603,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3540,
+        4140,
         40
       ],
       "credentials": {
@@ -686,7 +686,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        3740,
+        4340,
         40
       ]
     },
@@ -703,7 +703,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3340,
+        3940,
         280
       ],
       "credentials": {
@@ -713,6 +713,81 @@
         }
       },
       "notes": "Closes the run and returns the company to the queue, or parks it at 'ignored' after three failures."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the ATS job-board URLs to try for each company.\n//\n// docs/company-research.md: six conventional paths on the company's own domain.\n// That is where the evidence is not: measured over 38 European companies, only\n// a minority publish DevOps/SRE adverts on their own site, while the boards\n// below answer with the full advert text as public JSON and no credential.\n// Without this the hiring signal the whole product rests on is invisible.\n//\n// One item out per (company, candidate board). The fan-out mirrors Split URLs.\n\nconst ATS_LINK_PATTERNS = [\n  ['greenhouse', /(?:boards|job-boards)\\.greenhouse\\.io\\/(?:embed\\/job_board\\?for=)?([a-z0-9_-]+)/gi],\n  ['ashby',      /jobs\\.ashbyhq\\.com\\/([a-z0-9_-]+)/gi],\n  ['lever',      /jobs\\.lever\\.co\\/([a-z0-9_-]+)/gi],\n  ['workable',   /apply\\.workable\\.com\\/([a-z0-9_-]+)/gi],\n  ['recruitee',  /([a-z0-9_-]+)\\.recruitee\\.com/gi],\n  ['teamtailor', /([a-z0-9_-]+)\\.teamtailor\\.com/gi],\n  ['personio',   /([a-z0-9_-]+)\\.jobs\\.personio\\.(?:de|com)/gi],\n  ['smartrecruiters', /careers\\.smartrecruiters\\.com\\/([a-z0-9_-]+)/gi],\n];\n\n// Slugs that match a pattern but are not a company.\nconst SLUG_DENYLIST = new Set([\n  'embed', 'job_board', 'www', 'api', 'jobs', 'careers', 'boards', 'app', 'static', 'assets',\n]);\n\n// Public, unauthenticated endpoints. `content` marks whether the response\n// carries full descriptions: titles alone never mention Kubernetes.\nconst PROVIDERS = {\n  greenhouse: { url: (s) => `https://boards-api.greenhouse.io/v1/boards/${s}/jobs?content=true` },\n  ashby:      { url: (s) => `https://api.ashbyhq.com/posting-api/job-board/${s}?includeCompensation=false` },\n  lever:      { url: (s) => `https://api.lever.co/v0/postings/${s}?mode=json` },\n  workable:   { url: (s) => `https://apply.workable.com/api/v1/widget/accounts/${s}?details=true` },\n  recruitee:  { url: (s) => `https://${s}.recruitee.com/api/offers/` },\n  // Both of these return the full description in the same single request the\n  // other five need, so they cost nothing extra to support. The providers that\n  // only list titles and require a second call per advert (SmartRecruiters,\n  // Workday, Rippling, Join) are deliberately not here: the N+1 traffic needs\n  // its own rate-limiting decision first.\n  teamtailor: { url: (s) => `https://${s}.teamtailor.com/jobs.json` },\n  personio:   { url: (s) => `https://${s}.jobs.personio.de/search.json?language=en` },\n};\n\nfunction slugCandidates(domain) {\n  const d = String(domain || '').toLowerCase().trim();\n  const label = d.split('.')[0].replace(/[^a-z0-9-]/g, '');\n  // Never return empty: downstream this is a splitOut, and a company with no\n  // candidate URLs would drop out of the run entirely.\n  if (!label) {\n    const flat = d.replace(/[^a-z0-9]/g, '');\n    return flat ? [flat] : [];\n  }\n  const out = [label];\n  if (label.includes('-')) out.push(label.replace(/-/g, ''));\n  // A domain of punctuation collapses to an empty slug, which would build a\n  // URL ending in a bare slash and fetch something unrelated.\n  return [...new Set(out)].filter((x) => x.length >= 2);\n}\n\nfunction atsCandidates(domain, hints, maxPerCompany) {\n  const seen = new Set();\n  const out = [];\n  const push = (provider, slug, via) => {\n    if (!PROVIDERS[provider]) return;\n    const key = provider + ':' + slug;\n    if (seen.has(key)) return;\n    seen.add(key);\n    out.push({ provider, slug, via, url: PROVIDERS[provider].url(slug) });\n  };\n\n  // A link the company published on its own careers page is not a guess, so\n  // when there is one we stop there: firing five speculative requests at five\n  // providers on top of a known-good answer is rude and buys nothing.\n  for (const h of hints || []) push(h.provider, h.slug, 'link');\n  if (out.length) return out.slice(0, maxPerCompany);\n\n  for (const slug of slugCandidates(domain)) {\n    for (const provider of Object.keys(PROVIDERS)) push(provider, slug, 'guess');\n  }\n  return out.slice(0, maxPerCompany);\n}\n\nconst MAX_CANDIDATES = Number($env.RESEARCH_ATS_MAX_CANDIDATES || 8);\nconst out = [];\n\nfor (const item of $input.all()) {\n  const c = item.json;\n  const candidates = atsCandidates(c.domain, c.ats_hints || [], MAX_CANDIDATES);\n  for (const cand of candidates) {\n    out.push({ json: {\n      company_id: c.company_id,\n      domain: c.domain,\n      url: cand.url,\n      ats_provider: cand.provider,\n      ats_slug: cand.slug,\n      ats_via: cand.via,\n    } });\n  }\n}\n\n// An empty return would end the branch and no company would reach triage at\n// all. Every company with a domain yields candidates, so this is unreachable in\n// practice, but \"unreachable\" is how silent pipeline stalls get written.\nif (!out.length) {\n  out.push({ json: { company_id: null, url: 'https://boards-api.greenhouse.io/v1/boards/__none__/jobs', ats_noop: true } });\n}\n\nreturn out;\n"
+      },
+      "id": "ats-candidates",
+      "name": "ATS Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 3
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": "={{ Number($env.RESEARCH_FETCH_BATCH_SIZE || 1) }}",
+              "batchInterval": "={{ Number($env.RESEARCH_ATS_BATCH_INTERVAL_MS || 400) }}"
+            }
+          }
+        }
+      },
+      "id": "fetch-ats-board",
+      "name": "Fetch ATS Board",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        300
+      ],
+      "notes": "Public job-board JSON. No credential: these endpoints are unauthenticated by design. neverError is on because a guessed slug answering 404 is the expected case, not a failure."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fold the ATS boards back into one item per company, and rebuild `material`.\n//\n// The company list is read from Group Material, not from the responses: a\n// company whose boards all 404 must still reach triage with its own pages.\n\nfunction stripHtml(s) {\n  return String(s || '')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    // Block-level tags become line breaks. Ashby returns a description with no\n    // newlines at all, so collapsing every tag to a space produced one 4900\n    // character paragraph, and paragraph-level selection then had nothing to\n    // select: the whole advert was kept or dropped as a unit.\n    .replace(/<\\/(p|div|li|ul|ol|h[1-6]|tr|section|article|blockquote)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<li[^>]*>/gi, '\\n- ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"').replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/&#(\\d+);/g, (_, d) => String.fromCharCode(+d))\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// One shape per provider. Anything unparseable returns null so the caller can\n// record a failure rather than pretend the board was empty.\nfunction parseBoard(provider, body) {\n  let d;\n  try { d = JSON.parse(body); } catch { return null; }\n  const jobs = [];\n  const add = (title, desc, loc, url) => {\n    if (!title) return;\n    jobs.push({\n      title: String(title).trim(),\n      description: stripHtml(desc),\n      location: String(loc || '').trim(),\n      url: url || '',\n    });\n  };\n  if (provider === 'greenhouse') {\n    if (!Array.isArray(d.jobs)) return null;\n    for (const j of d.jobs) add(j.title, j.content, j.location && j.location.name, j.absolute_url);\n  } else if (provider === 'ashby') {\n    if (!Array.isArray(d.jobs)) return null;\n    for (const j of d.jobs) add(j.title, j.descriptionHtml || j.descriptionPlain, j.location, j.jobUrl);\n  } else if (provider === 'lever') {\n    if (!Array.isArray(d)) return null;\n    for (const j of d) add(j.text, j.descriptionPlain || j.description,\n      j.categories && j.categories.location, j.hostedUrl);\n  } else if (provider === 'workable') {\n    if (!Array.isArray(d.jobs)) return null;\n    for (const j of d.jobs) add(j.title, j.description, j.location && j.location.city, j.url);\n  } else if (provider === 'recruitee') {\n    if (!Array.isArray(d.offers)) return null;\n    for (const j of d.offers) add(j.title, j.description, j.city, j.careers_url);\n  } else if (provider === 'teamtailor') {\n    if (!Array.isArray(d.items)) return null;\n    for (const j of d.items) add(j.title, j.content_html, '', j.url);\n  } else if (provider === 'personio') {\n    // The root is a bare array here, not an object with a jobs key.\n    if (!Array.isArray(d)) return null;\n    for (const j of d) add(j.name, j.description, j.office, j.id);\n  } else {\n    return null;\n  }\n  return jobs;\n}\n\nconst TERM_WEIGHTS = [\n  // Unambiguous: you do not write these unless you operate infrastructure.\n  ['kubernetes', 6], ['k8s', 6], ['terraform', 6], ['site reliability', 6],\n  ['infrastructure as code', 6], ['argocd', 6], ['argo cd', 6], ['service mesh', 6],\n  ['istio', 5], ['linkerd', 5], ['helm', 5], ['pulumi', 5], ['ansible', 4],\n  ['prometheus', 4], ['grafana', 4], ['observability', 4], ['devops', 4],\n  // Suggestive, but common in ordinary engineering ads.\n  ['microservice', 2], ['ci/cd', 2], ['cicd', 2], ['datadog', 2], ['autoscal', 2],\n  ['incident response', 2], ['on-call', 2], ['oncall', 2], ['slo', 2],\n  // Weak on their own: present in a great many unrelated adverts.\n  ['docker', 1], ['container', 1], ['gcp', 1], ['azure', 1], ['aws', 1], ['sla', 0],\n];\n\n// A title that names the role is the strongest signal there is, but it has to\n// be the role and not a word inside another one: \"Credit Platform\" is not a\n// platform engineering job, and bare \"cloud\" or \"platform\" match far too much.\nconst TITLE_ROLE = new RegExp(\n  '\\\\b(' + [\n    'devops', 'sre', 'site reliability', 'platform engineer', 'platform engineering',\n    'infrastructure engineer', 'infrastructure architect', 'cloud engineer',\n    'cloud architect', 'cloud infrastructure', 'kubernetes', 'systems engineer',\n    'production engineer', 'reliability engineer', 'observability',\n  ].join('|') + ')\\\\b', 'i');\n\nfunction infraScore(job) {\n  const hay = (job.title + ' \\n ' + job.description).toLowerCase();\n  let score = 0;\n  const hits = [];\n  for (const [term, weight] of TERM_WEIGHTS) {\n    const n = hay.split(term).length - 1;\n    if (n > 0 && weight > 0) {\n      // Repeats count, but with diminishing returns: one advert repeating\n      // \"AWS\" nine times is not nine times the evidence.\n      score += weight * Math.min(n, 3);\n      hits.push(term);\n    }\n  }\n  if (TITLE_ROLE.test(job.title)) score += 30;\n  return { score, hits };\n}\n\n// A job description opens with several paragraphs about the company's mission\n// and only later says which tools the team runs. Taking the first N characters\n// therefore keeps the marketing and throws away the evidence, which is how an\n// advert demanding Kubernetes reached the model as \"About GoCardless...\".\n// So: keep the paragraphs that carry the signal, in their original order.\nfunction condenseDescription(desc, budget) {\n  let paras = String(desc).split(/\\n{1,}/).map((p) => p.trim()).filter((p) => p.length > 1);\n  // A description that arrives as a single blob still has to be divisible, or\n  // selection degrades to \"keep the opening\", which is the marketing.\n  if (paras.length <= 2) {\n    paras = String(desc)\n      .split(/(?<=[.!?])\\s+(?=[A-Z])/)\n      .map((p) => p.trim())\n      .filter((p) => p.length > 1);\n  }\n  if (!paras.length) return '';\n  const whole = paras.join('\\n');\n  if (whole.length <= budget) return whole;\n\n  const ranked = paras.map((text, i) => ({ i, text, score: infraScore({ title: '', description: text }).score }));\n  const keep = new Set();\n  let used = 0;\n  for (const p of ranked.slice().sort((a, b) => b.score - a.score || a.i - b.i)) {\n    if (p.score <= 0) break;\n    if (used + p.text.length > budget) continue;\n    keep.add(p.i);\n    used += p.text.length + 1;\n  }\n  // Nothing scored: fall back to the opening, which is better than nothing.\n  if (!keep.size) return whole.slice(0, budget);\n  // Spend any remaining room on the opening paragraph for context.\n  if (!keep.has(0) && used + paras[0].length <= budget) { keep.add(0); used += paras[0].length + 1; }\n\n  const chosen = [...keep].sort((a, b) => a - b);\n  const out = [];\n  let prev = -1;\n  for (const i of chosen) {\n    if (prev >= 0 && i > prev + 1) out.push('[...]');\n    out.push(paras[i]);\n    prev = i;\n  }\n  return out.join('\\n');\n}\n\nfunction buildAtsSection(board, opts) {\n  const o = Object.assign({\n    titlesBudget: 3000,     // enough to show the shape of the hiring\n    descBudget: 11000,      // the part that decides technology_fit\n    maxJobs: 6,\n  }, opts || {});\n\n  const scored = board.jobs\n    .map((j) => Object.assign({}, j, infraScore(j)))\n    .sort((a, b) => b.score - a.score);\n  const relevant = scored.filter((j) => j.score > 0);\n\n  const head = [\n    '### SOURCE: ' + board.url,\n    'ATS job board (' + board.provider + ', slug \"' + board.slug + '\", discovered by ' + board.via + ').',\n    'Open roles advertised: ' + board.jobs.length + '. Roles mentioning infrastructure work: ' + relevant.length + '.',\n    '',\n  ];\n\n  // Titles get a fixed budget of their own. A board with 225 roles must not be\n  // able to spend the whole block on a list of job names and leave no room for\n  // the descriptions, which is exactly what the first version did.\n  const titleLines = ['OPEN ROLES:'];\n  let titleChars = 0;\n  let listed = 0;\n  for (const j of scored) {\n    const line = '- ' + j.title + (j.location ? ' (' + j.location + ')' : '');\n    if (titleChars + line.length > o.titlesBudget) break;\n    titleLines.push(line);\n    titleChars += line.length + 1;\n    listed += 1;\n  }\n  if (listed < scored.length) titleLines.push('- ... and ' + (scored.length - listed) + ' more');\n\n  // Descriptions share what is left, split evenly across the roles that\n  // actually scored, best first.\n  const descLines = [];\n  let truncated = listed < scored.length;\n  if (relevant.length) {\n    const take = relevant.slice(0, o.maxJobs);\n    const perJob = Math.max(800, Math.floor(o.descBudget / take.length));\n    descLines.push('', 'FULL TEXT OF THE INFRASTRUCTURE-RELATED ROLES:');\n    for (const j of take) {\n      descLines.push('', '--- ' + j.title + (j.location ? ' (' + j.location + ')' : '') + ' ---');\n      if (j.description.length > perJob) truncated = true;\n      descLines.push(condenseDescription(j.description, perJob));\n    }\n    if (relevant.length > take.length) {\n      descLines.push('', '(' + (relevant.length - take.length) + ' further infrastructure-related roles not shown)');\n    }\n  }\n\n  const text = head.concat(titleLines, descLines).join('\\n');\n  return {\n    text, truncated,\n    total_jobs: board.jobs.length,\n    relevant_jobs: relevant.length,\n    top_score: scored.length ? scored[0].score : 0,\n    top_title: scored.length ? scored[0].title : '',\n  };\n}\n\nconst MAX_CHARS_TOTAL = Number($env.RESEARCH_MATERIAL_MAX_CHARS || 32000);\nconst ATS_BUDGET = Number($env.RESEARCH_ATS_MAX_CHARS || 14000);\n\nconst companies = $('Group Material').all();\nconst candidates = $('ATS Candidates').all();\nconst responses = $input.all();\n\n// company_id -> every board that parsed\nconst boards = new Map();\nconst attempts = new Map();\n\nfor (let i = 0; i < responses.length; i++) {\n  const cand = (candidates[i] && candidates[i].json) || {};\n  if (!cand.company_id) continue;\n  const res = (responses[i] && responses[i].json) || {};\n\n  attempts.set(cand.company_id, (attempts.get(cand.company_id) || 0) + 1);\n\n  const body = typeof res.data === 'string' ? res.data : '';\n  if (!body) continue;\n  const jobs = parseBoard(cand.ats_provider, body);\n  // A 404 body parses to null. That is the normal answer for a guessed slug\n  // and is not worth recording as a failure.\n  if (!jobs || !jobs.length) continue;\n\n  if (!boards.has(cand.company_id)) boards.set(cand.company_id, []);\n  boards.get(cand.company_id).push({\n    provider: cand.ats_provider, slug: cand.ats_slug, via: cand.ats_via,\n    url: cand.url, jobs,\n  });\n}\n\nconst out = [];\nfor (const item of companies) {\n  const c = { ...item.json };\n  const found = boards.get(c.company_id) || [];\n\n  // A board the company linked to beats one whose slug we guessed; between two\n  // of the same kind, the one advertising more roles.\n  found.sort((a, b) => (a.via === b.via ? b.jobs.length - a.jobs.length : (a.via === 'link' ? -1 : 1)));\n\n  const sections = Array.isArray(c.sections) ? c.sections.slice() : [];\n  const sources = Array.isArray(c.sources) ? c.sources.slice() : [];\n  let ats = null;\n\n  if (found.length) {\n    const best = found[0];\n    const built = buildAtsSection(best, { descBudget: Math.max(2000, ATS_BUDGET - 3000), titlesBudget: 3000 });\n    // The ATS block goes first. If anything has to be cut it must be the\n    // marketing copy on the home page, never the adverts.\n    sections.unshift(built.text);\n    sources.unshift(best.url);\n    ats = {\n      provider: best.provider, slug: best.slug, via: best.via, url: best.url,\n      total_jobs: built.total_jobs, relevant_jobs: built.relevant_jobs,\n      top_score: built.top_score, top_title: built.top_title,\n      boards_found: found.length,\n    };\n  }\n\n  let material = sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n\n  const { sections: _drop, ats_hints: _drop2, ...rest } = c;\n  out.push({ json: {\n    ...rest,\n    material,\n    material_chars: material.length,\n    material_truncated: truncated,\n    sources,\n    pages_fetched: sources.length,\n    ats,\n    ats_attempted: attempts.get(c.company_id) || 0,\n    rendering_unavailable: sources.length === 0 && (c.fetch_failures || []).length > 0,\n  } });\n}\n\nreturn out;\n"
+      },
+      "id": "merge-ats-material",
+      "name": "Merge ATS Material",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
     }
   ],
   "connections": {
@@ -841,7 +916,7 @@
       "main": [
         [
           {
-            "node": "Open Triage Run",
+            "node": "ATS Candidates",
             "type": "main",
             "index": 0
           }
@@ -1010,6 +1085,39 @@
         [
           {
             "node": "Researched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ATS Candidates": {
+      "main": [
+        [
+          {
+            "node": "Fetch ATS Board",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch ATS Board": {
+      "main": [
+        [
+          {
+            "node": "Merge ATS Material",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge ATS Material": {
+      "main": [
+        [
+          {
+            "node": "Open Triage Run",
             "type": "main",
             "index": 0
           }

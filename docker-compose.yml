@@ -154,6 +154,15 @@ services:
       RESEARCH_FETCH_BATCH_SIZE: ${RESEARCH_FETCH_BATCH_SIZE:-1}
       RESEARCH_FETCH_BATCH_INTERVAL_MS: ${RESEARCH_FETCH_BATCH_INTERVAL_MS:-1000}
 
+      # External ATS job boards (WF-02). Most companies of this profile do not
+      # advertise infrastructure roles on their own domain; they publish them on
+      # a job board whose JSON is public. These control how hard that is probed
+      # and how much of the result reaches the model.
+      RESEARCH_ATS_MAX_CANDIDATES: ${RESEARCH_ATS_MAX_CANDIDATES:-8}
+      RESEARCH_ATS_BATCH_INTERVAL_MS: ${RESEARCH_ATS_BATCH_INTERVAL_MS:-400}
+      RESEARCH_ATS_MAX_CHARS: ${RESEARCH_ATS_MAX_CHARS:-14000}
+      RESEARCH_MATERIAL_MAX_CHARS: ${RESEARCH_MATERIAL_MAX_CHARS:-32000}
+
       # Contact enrichment (WF-03).
       ENRICH_BATCH_SIZE: ${ENRICH_BATCH_SIZE:-3}
       ENRICH_CANDIDATE_POOL: ${ENRICH_CANDIDATE_POOL:-15}

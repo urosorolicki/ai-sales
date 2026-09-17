@@ -14,6 +14,7 @@ Every 30 Minutes
   -> Claim Companies                               (FOR UPDATE SKIP LOCKED)
   -> Candidate URLs -> Fetch robots.txt -> Allowed URLs
   -> Split URLs -> Fetch Page -> Group Material    (fan out per page, fan back in per company)
+  -> ATS Candidates -> Fetch ATS Board -> Merge ATS Material   (external job boards)
   -> Open Triage Run -> Triage -> Validate Triage -> Close Triage Run   (local, free)
   -> Worth Researching?
         +-- false -> Park Company -> Skipped                            (no paid call)
@@ -137,6 +138,61 @@ whole markdown file as a prompt.
 
 Six conventional paths per company: `/`, `/about`, `/careers`, `/jobs`,
 `/blog`, `/engineering`. This is a research pass, not a crawl.
+
+### External ATS job boards
+
+Those six paths miss the hiring signal for most companies of this profile. Of 38
+European companies probed, a board was reachable for 19 of them, and the adverts
+were on Greenhouse, Ashby, Lever, Workable, Recruitee, Teamtailor or Personio
+rather than on the company's own site. All seven answer with public JSON and no
+credential, so **this does not need Playwright**, which was the assumption in
+`docs/architecture.md`.
+
+The slug is found two ways, and they catch different companies:
+
+- **From a link** on the company's own careers page. This is harvested in
+  `Group Material` from the *raw* HTML, because `htmlToText` discards the href
+  and the href is where the slug is. A published link is not a guess, so when
+  there is one no other board is probed.
+- **Guessed from the domain**, which covered 17 of the 38. `smartly.io` shows
+  why both are needed: its slug is `smartlyio`, so the guess misses and the link
+  finds it.
+
+`Merge ATS Material` decides what reaches the model, and the split matters:
+
+| Part | Budget | Answers |
+|---|---|---|
+| Every open role, title and location | `3000` chars | how much, and for what, they are hiring |
+| Full text of the infrastructure roles, best first | the rest of `RESEARCH_ATS_MAX_CHARS` | whether they run their own infrastructure |
+
+Titles alone are not enough and that is the whole point. A board returning only
+titles says "Backend Engineer"; the description is where Kubernetes and
+Terraform appear. Measured on Monzo's board: zero infrastructure terms in the
+titles, thirty in the descriptions.
+
+Descriptions are **not** truncated from the front. An advert opens with several
+paragraphs about the company and names its tools much later, so the first 1800
+characters are the marketing. Paragraphs are ranked by infrastructure content
+and kept in their original order, which cut GoCardless from 12846 characters to
+4031 while keeping Kubernetes, Terraform, ArgoCD and Prometheus.
+
+Role relevance is weighted rather than counted. A flat count of keyword hits put
+"Senior Credit Risk Manager, Credit Platform" above a backend role that actually
+names Kubernetes, because it said "SLA" twice and had "Platform" in its title.
+Terms only written by a team running its own infrastructure score highest, and
+the title bonus requires the role itself, not a word inside another one.
+
+The ATS block is placed **first** in the material: if anything has to be cut to
+fit `RESEARCH_MATERIAL_MAX_CHARS`, it must be the home page copy, never the
+adverts.
+
+A company whose boards all answer 404 is not a failure. That is the normal reply
+to a guessed slug, it is not logged, and the company continues to triage with
+whatever its own site gave.
+
+Four providers were researched and deliberately left out: SmartRecruiters,
+Workday, Rippling and Join.com all list titles only and need a second request
+per advert. That N+1 traffic needs its own rate-limiting decision first.
 
 **robots.txt is respected.** It is fetched first, parsed for our user agent
 (`AiSalesMachineBot`, falling back to the `*` group), and longest-match wins
@@ -303,7 +359,9 @@ ORDER BY c.created_at DESC;
 
 **Playwright.** `docs/architecture.md` lists it as the fallback for pages that
 need JavaScript, but it is not in `docker-compose.yml` and no service was added
-for it. A page that renders nothing useful is recorded in `fetch_failures` and
+for it. It is also less needed than it looked: the case it was wanted for was
+the JavaScript-rendered careers page, and the ATS job boards answer that with
+public JSON instead. A page that renders nothing useful is recorded in `fetch_failures` and
 flagged as `rendering_unavailable`, so the gap is visible in the data rather
 than silently treated as "this company has no careers page".
 

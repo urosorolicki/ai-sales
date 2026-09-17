@@ -341,6 +341,31 @@ schedule, but not by much.
 
 ## Verifying
 
+How much the ATS stage is actually contributing, which is the number to watch
+after any change to the discovery or the weighting:
+
+```sql
+SELECT c.name,
+       r.input -> 'ats' ->> 'provider'      AS board,
+       r.input -> 'ats' ->> 'via'           AS found_by,
+       r.input -> 'ats' ->> 'total_jobs'    AS roles,
+       r.input -> 'ats' ->> 'relevant_jobs' AS infra_roles,
+       r.input -> 'ats' ->> 'top_title'     AS best_role,
+       r.input ->> 'ats_attempted'          AS boards_tried,
+       r.input ->> 'material_chars'         AS chars,
+       c.total_score, c.score_band
+FROM agent_runs r
+JOIN companies c ON c.id = r.company_id
+WHERE r.agent_name = 'research'
+ORDER BY r.started_at DESC;
+```
+
+A `board` of null with `boards_tried` of 5 or more means every guess answered
+404 and the company published no link: that company is researched on its own
+pages only, which is the pre-ATS behaviour and the expected outcome for roughly
+half of them. A `found_by` of `guess` that keeps returning boards with zero
+`infra_roles` is worth checking by hand - it may be the wrong company's board.
+
 ```sql
 SELECT c.name, c.status, c.score_band,
        jsonb_array_length(c.tech_stack) AS tech,

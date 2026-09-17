@@ -55,6 +55,27 @@ Redis would have been the obvious place for this and was not used: n8n has a
 Postgres credential and no Redis one, and "when did we last touch this domain"
 is worth keeping across a restart.
 
+## One model, five companies, one queue
+
+Ollama serves one request at a time: `llama-server` is started with `-np 1`, so
+`RESEARCH_BATCH_SIZE` companies do not research in parallel no matter how many
+HTTP requests n8n opens. They queue, and the last one waits out all the others
+before its own call begins.
+
+`RESEARCH_MODEL_TIMEOUT_MS` is a wall-clock timeout on the HTTP request, so it
+has to cover the **queue**, not the model. Measured on this machine with a batch
+of five: 30 minutes wall clock, one success and four `timeout of 900000ms
+exceeded`. A single company answers in about three minutes, so nothing was slow;
+four requests simply spent their fifteen minutes waiting for a turn.
+
+The fix is the timeout, not the batch size - the batch is what keeps the GPU
+busy. Budget roughly `RESEARCH_BATCH_SIZE x per-company time x 1.5`, which is
+why this machine runs `RESEARCH_MODEL_TIMEOUT_MS=2700000`.
+
+This gets worse as the material grows, and the ATS stage grows it: a company
+with a job board sends up to `RESEARCH_MATERIAL_MAX_CHARS` instead of the 24000
+it sent before, and a longer prompt is a longer call.
+
 ## Two models, on purpose
 
 The expensive model is only called for companies that survive a free local

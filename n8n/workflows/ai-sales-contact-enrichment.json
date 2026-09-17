@@ -187,7 +187,7 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        2500,
+        2900,
         300
       ],
       "notes": "allOtherFields because the HTTP node replaces the item json and would lose company_id."
@@ -232,7 +232,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2700,
+        3100,
         300
       ],
       "notes": "One request at a time by default. domain_fetch_log is the limit between runs; this is the limit inside one."
@@ -246,7 +246,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2900,
+        3300,
         300
       ],
       "notes": "Pulls mailto: addresses out of the raw HTML before the tags are stripped."
@@ -260,7 +260,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3100,
+        3500,
         300
       ],
       "notes": "Prompt and schema read from disk, so this node cannot drift from them."
@@ -281,7 +281,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3300,
+        3700,
         300
       ],
       "notes": "Local model, no cost. /v1/chat/completions because /api/chat ignores the schema - see docs/ollama.md."
@@ -295,7 +295,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3500,
+        3900,
         300
       ],
       "notes": "Every name and every address is checked against the fetched pages. This node is the whole point of the workflow."
@@ -330,7 +330,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3700,
+        4100,
         300
       ],
       "notes": "False means the model failed, not that nothing was found."
@@ -365,7 +365,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3900,
+        4300,
         200
       ],
       "notes": "Nothing found is a normal outcome and is recorded as 'skipped', not as an error."
@@ -383,7 +383,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        4120,
+        4520,
         100
       ],
       "credentials": {
@@ -407,7 +407,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        4340,
+        4740,
         100
       ],
       "credentials": {
@@ -485,7 +485,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        4560,
+        4960,
         100
       ],
       "notes": "A run that found people. company_status should read 'researched'."
@@ -503,7 +503,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        4120,
+        4520,
         420
       ],
       "credentials": {
@@ -569,17 +569,17 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        4340,
+        4740,
         420
       ],
       "notes": "No contact found is a normal outcome, not a failure."
     },
     {
       "parameters": {
-        "jsCode": "// Which GitHub accounts might belong to this company.\n//\n// Measured over eleven companies of this profile, not one published a personal\n// address on its own website, so WF-03 could never observe the pattern its own\n// inference step needs. Their engineers' work addresses are in the commit\n// metadata of the company's public repositories, which is public by\n// construction: git puts the author address in the commit object.\n\nconst GH_LINK = /github\\.com\\/([A-Za-z0-9][A-Za-z0-9-]{0,38})(?![A-Za-z0-9-])/gi;\n\n// Paths under github.com that are GitHub's own, not a company account.\nconst GH_RESERVED = new Set([\n  'features', 'about', 'pricing', 'enterprise', 'login', 'join', 'marketplace',\n  'explore', 'topics', 'collections', 'events', 'sponsors', 'readme', 'orgs',\n  'apps', 'settings', 'site', 'security', 'customer-stories', 'trending',\n  'search', 'new', 'notifications', 'issues', 'pulls', 'codespaces', 'sitemap',\n]);\n\n// Addresses and names that belong to machinery rather than to a person.\n\n// A link on the company's own site beats a guess, so when there is one the\n// guesses are not tried: the GitHub API allows 60 calls an hour without a\n// token and every wasted call is one a real company does not get.\nfunction orgCandidates(domain, hints, max) {\n  const seen = new Set();\n  const out = [];\n  const push = (org, via) => {\n    const key = org.toLowerCase();\n    if (!org || seen.has(key)) return;\n    seen.add(key);\n    out.push({ org, via });\n  };\n  for (const h of hints || []) push(h, 'link');\n  if (out.length) return out.slice(0, max);\n\n  const d = String(domain || '').toLowerCase();\n  const label = d.split('.')[0].replace(/[^a-z0-9-]/g, '');\n  const tld = d.split('.').slice(1).join('');\n  if (label.length >= 2) {\n    push(label, 'guess');\n    // smartly.io's account is \"smartlyio\" and miro.com's is \"miroapp\": brands\n    // that read the domain as one word are common enough to be worth one call.\n    if (tld && tld.length <= 3) push(label + tld, 'guess');\n    if (label.includes('-')) push(label.replace(/-/g, ''), 'guess');\n  }\n  return out.slice(0, max);\n}\n\nconst MAX_ORGS = Number($env.ENRICH_GITHUB_MAX_ORGS || 3);\nconst out = [];\n\nfor (const item of $input.all()) {\n  const c = item.json;\n  if (String($env.ENRICH_GITHUB_ENABLED || 'true') !== 'true') continue;\n  for (const cand of orgCandidates(c.domain, c.github_hints || [], MAX_ORGS)) {\n    out.push({ json: {\n      company_id: c.company_id,\n      domain: c.domain,\n      gh_org: cand.org,\n      gh_via: cand.via,\n      url: 'https://api.github.com/orgs/' + encodeURIComponent(cand.org) + '/repos?sort=pushed&per_page=5',\n    } });\n  }\n}\n\n// Never return empty: this is a fan-out and an empty branch would drop every\n// company out of the run rather than merely leaving it without contacts.\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/orgs/__none__/repos' } });\n}\n\nreturn out;\n"
+        "jsCode": "// One search per company, to find the GitHub account by name.\n//\n// Guessing the account from the domain costs a call per guess out of the 60 an\n// hour the unauthenticated API allows, and still misses: miro.com's account is\n// \"miroapp\" and no guess reaches that. Search has its own separate budget of 10\n// a minute, so asking it once per company is both cheaper and better.\n//\n// A wrong account is self-correcting further down: commit authors are kept only\n// when the address is on the company's own domain, so an unrelated account\n// yields nothing rather than yielding somebody else's engineers.\n\nconst GH_LINK = /github\\.com\\/([A-Za-z0-9][A-Za-z0-9-]{0,38})(?![A-Za-z0-9-])/gi;\nconst GH_RESERVED = new Set([\n  'features', 'about', 'pricing', 'enterprise', 'login', 'join', 'marketplace',\n  'explore', 'topics', 'collections', 'events', 'sponsors', 'readme', 'orgs',\n  'apps', 'settings', 'site', 'security', 'customer-stories', 'trending',\n  'search', 'new', 'notifications', 'issues', 'pulls', 'codespaces', 'sitemap',\n]);\n\nconst out = [];\nfor (const item of $input.all()) {\n  const c = item.json;\n  if (String($env.ENRICH_GITHUB_ENABLED || 'true') !== 'true') continue;\n\n  const hints = (c.github_hints || []).filter((h) => !GH_RESERVED.has(String(h).toLowerCase()));\n  const label = String(c.domain || '').toLowerCase().split('.')[0].replace(/[^a-z0-9-]/g, '');\n\n  out.push({ json: {\n    company_id: c.company_id,\n    domain: c.domain,\n    gh_hint: hints[0] || null,\n    // Searched even when there is a hint: the search is on a separate budget,\n    // and the result is only used if the hint turns out not to work.\n    url: 'https://api.github.com/search/users?q=' +\n         encodeURIComponent(label + ' type:org') + '&per_page=5',\n  } });\n}\n\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/search/users?q=__none__+type:org' } });\n}\n\nreturn out;\n"
       },
-      "id": "gh-candidates",
-      "name": "GitHub Candidates",
+      "id": "gh-search",
+      "name": "GitHub Search",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -635,21 +635,21 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        1940,
         300
       ],
       "notes": "Public GitHub API. GITHUB_TOKEN is optional: without it the limit is 60 calls an hour, which fits ENRICH_BATCH_SIZE=3 hourly and little more."
     },
     {
       "parameters": {
-        "jsCode": "// Choose the account that answered, and ask it for commits.\n//\n// The unauthenticated GitHub API allows 60 calls an hour. A company costs one\n// call per candidate account plus one per repository read, so the candidate\n// list is kept short and a repository with no recent pushes is not read at all.\n\nconst MAX_REPOS = Number($env.ENRICH_GITHUB_MAX_REPOS || 3);\nconst COMMITS_PER_REPO = Number($env.ENRICH_GITHUB_COMMITS_PER_REPO || 40);\n\nconst candidates = $('GitHub Candidates').all();\nconst responses = $input.all();\n\n// company_id -> the first candidate account that returned repositories\nconst chosen = new Map();\nconst rate = { remaining: null };\n\nfor (let i = 0; i < responses.length; i++) {\n  const cand = (candidates[i] && candidates[i].json) || {};\n  if (!cand.company_id) continue;\n  if (chosen.has(cand.company_id)) continue;\n\n  const res = (responses[i] && responses[i].json) || {};\n  const body = typeof res.data === 'string' ? res.data : '';\n  if (!body) continue;\n  let repos;\n  try { repos = JSON.parse(body); } catch { continue; }\n  if (!Array.isArray(repos) || !repos.length) continue;\n\n  chosen.set(cand.company_id, { cand, repos });\n}\n\nconst out = [];\nfor (const [companyId, { cand, repos }] of chosen) {\n  const usable = repos\n    .filter((r) => r && r.name && !r.archived && !r.fork)\n    .slice(0, MAX_REPOS);\n  for (const r of usable) {\n    out.push({ json: {\n      company_id: companyId,\n      domain: cand.domain,\n      gh_org: cand.gh_org,\n      gh_via: cand.gh_via,\n      repo: r.name,\n      url: 'https://api.github.com/repos/' + encodeURIComponent(cand.gh_org) +\n           '/' + encodeURIComponent(r.name) + '/commits?per_page=' + COMMITS_PER_REPO,\n    } });\n  }\n}\n\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/repos/__none__/__none__/commits' } });\n}\n\nreturn out;\n"
+        "jsCode": "// Choose the account that answered, and ask it for commits.\n//\n// The unauthenticated GitHub API allows 60 calls an hour. A company costs one\n// call per candidate account plus one per repository read, so the candidate\n// list is kept short and a repository with no recent pushes is not read at all.\n\nconst MAX_REPOS = Number($env.ENRICH_GITHUB_MAX_REPOS || 3);\nconst COMMITS_PER_REPO = Number($env.ENRICH_GITHUB_COMMITS_PER_REPO || 40);\n\nconst candidates = $('Resolve Org').all();\nconst responses = $input.all();\n\n// company_id -> the first candidate account that returned repositories\nconst chosen = new Map();\nconst rate = { remaining: null };\n\nfor (let i = 0; i < responses.length; i++) {\n  const cand = (candidates[i] && candidates[i].json) || {};\n  if (!cand.company_id) continue;\n  if (chosen.has(cand.company_id)) continue;\n\n  const res = (responses[i] && responses[i].json) || {};\n  const body = typeof res.data === 'string' ? res.data : '';\n  if (!body) continue;\n  let repos;\n  try { repos = JSON.parse(body); } catch { continue; }\n  if (!Array.isArray(repos) || !repos.length) continue;\n\n  chosen.set(cand.company_id, { cand, repos });\n}\n\nconst out = [];\nfor (const [companyId, { cand, repos }] of chosen) {\n  const usable = repos\n    .filter((r) => r && r.name && !r.archived && !r.fork)\n    .slice(0, MAX_REPOS);\n  for (const r of usable) {\n    out.push({ json: {\n      company_id: companyId,\n      domain: cand.domain,\n      gh_org: cand.gh_org,\n      gh_via: cand.gh_via,\n      repo: r.name,\n      url: 'https://api.github.com/repos/' + encodeURIComponent(cand.gh_org) +\n           '/' + encodeURIComponent(r.name) + '/commits?per_page=' + COMMITS_PER_REPO,\n    } });\n  }\n}\n\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/repos/__none__/__none__/commits' } });\n}\n\nreturn out;\n"
       },
       "id": "pick-repos",
       "name": "Pick Repos",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1740,
+        2140,
         300
       ]
     },
@@ -701,7 +701,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1940,
+        2340,
         300
       ],
       "notes": "Commit metadata only. The author address is part of the commit object."
@@ -715,7 +715,73 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2140,
+        2540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $env.GITHUB_TOKEN ? 'Bearer ' + $env.GITHUB_TOKEN : undefined }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 2
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": "={{ Number($env.ENRICH_GITHUB_INTERVAL_MS || 400) }}"
+            }
+          }
+        }
+      },
+      "id": "fetch-gh-search",
+      "name": "Fetch GitHub Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "notes": "GitHub org search. Separate rate budget from the core API (10/min unauthenticated), so one per company is cheap."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Settle on one account per company and ask it for repositories.\n//\n// A link the company published on its own pages beats a search result; the\n// search is the fallback for the companies that publish no link, which was two\n// of the eleven measured and includes miro.com.\n\nconst searches = $('GitHub Search').all();\nconst responses = $input.all();\n\nfunction bestFromSearch(body, label) {\n  let d;\n  try { d = JSON.parse(body); } catch { return null; }\n  const items = Array.isArray(d && d.items) ? d.items : [];\n  if (!items.length) return null;\n  const want = String(label || '').replace(/[^a-z0-9]/g, '');\n  // An exact match on the login beats GitHub's own ranking; otherwise take the\n  // top hit, which is what put \"miroapp\" first for \"miro\".\n  const exact = items.find((u) => String(u.login || '').toLowerCase().replace(/[^a-z0-9]/g, '') === want);\n  return String(((exact || items[0]) || {}).login || '') || null;\n}\n\nconst out = [];\nfor (let i = 0; i < responses.length; i++) {\n  const req = (searches[i] && searches[i].json) || {};\n  if (!req.company_id) continue;\n\n  const body = typeof (responses[i] && responses[i].json && responses[i].json.data) === 'string'\n    ? responses[i].json.data : '';\n  const label = String(req.domain || '').split('.')[0];\n  const searched = bestFromSearch(body, label);\n\n  const org = req.gh_hint || searched;\n  if (!org) continue;\n\n  out.push({ json: {\n    company_id: req.company_id,\n    domain: req.domain,\n    gh_org: org,\n    gh_via: req.gh_hint ? 'link' : 'search',\n    gh_alt: req.gh_hint && searched && searched !== req.gh_hint ? searched : null,\n    url: 'https://api.github.com/orgs/' + encodeURIComponent(org) + '/repos?sort=pushed&per_page=5',\n  } });\n}\n\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/orgs/__none__/repos' } });\n}\n\nreturn out;\n"
+      },
+      "id": "resolve-org",
+      "name": "Resolve Org",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1740,
         300
       ]
     }
@@ -846,7 +912,7 @@
       "main": [
         [
           {
-            "node": "GitHub Candidates",
+            "node": "GitHub Search",
             "type": "main",
             "index": 0
           }
@@ -955,17 +1021,6 @@
         ]
       ]
     },
-    "GitHub Candidates": {
-      "main": [
-        [
-          {
-            "node": "Fetch GitHub Repos",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Fetch GitHub Repos": {
       "main": [
         [
@@ -1004,6 +1059,39 @@
         [
           {
             "node": "Build Enrichment Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GitHub Search": {
+      "main": [
+        [
+          {
+            "node": "Fetch GitHub Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch GitHub Search": {
+      "main": [
+        [
+          {
+            "node": "Resolve Org",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Org": {
+      "main": [
+        [
+          {
+            "node": "Fetch GitHub Repos",
             "type": "main",
             "index": 0
           }

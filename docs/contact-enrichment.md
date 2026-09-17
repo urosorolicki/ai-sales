@@ -96,12 +96,18 @@ unambiguous pattern:
 | gocardless.com | `flast` | Jamie Cobbett, `jcobbett@` |
 
 The account is found from a `github.com/...` link on the company's own pages,
-harvested from the **raw** HTML because `htmlToText` discards the href. Failing
-that it is guessed from the domain, including the domain read as one word, which
-is how `smartly.io` resolves to `smartlyio`. A published link is not a guess, so
-when there is one the guesses are not tried at all - the unauthenticated GitHub
-API allows 60 calls an hour and a wasted call is one a real company does not
-get. Nine accounts of eleven were found this way.
+harvested from the **raw** HTML because `htmlToText` discards the href. Where
+there is no link, the account is resolved by **searching GitHub**, not by
+guessing the domain: guessing costs one call per attempt out of the 60 an hour
+the core API allows, and still misses - miro.com's account is `miroapp`, which
+no guess derived from the domain reaches. Search sits on a **separate** budget
+of 10 a minute, so one search per company is both cheaper and better. An exact
+login match wins; otherwise GitHub's own ranking does, which is what puts
+`miroapp` first for `miro`.
+
+A wrong account is self-correcting: commit authors are kept only when the
+address is on the company's own domain, so an unrelated account yields nothing
+rather than yielding somebody else's engineers.
 
 These pairs are **not** passed through the model and are not checked against the
 fetched pages. They did not come from a model, so there is nothing to

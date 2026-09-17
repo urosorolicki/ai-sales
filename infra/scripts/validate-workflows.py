@@ -178,7 +178,7 @@ def main(argv):
     loaded = {}
     for path in paths:
         try:
-            loaded[path] = json.loads(path.read_text())
+            loaded[path] = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             print(f"{path.name}: not valid JSON: {exc}", file=sys.stderr)
             return 1
@@ -189,7 +189,7 @@ def main(argv):
     known_ids = set()
     for path in WORKFLOW_DIR.glob("*.json"):
         try:
-            known_ids.add(json.loads(path.read_text()).get("id"))
+            known_ids.add(json.loads(path.read_text(encoding="utf-8")).get("id"))
         except json.JSONDecodeError:
             pass
     known_ids |= {wf.get("id") for wf in loaded.values()}

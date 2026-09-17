@@ -187,7 +187,7 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        1500,
+        2500,
         300
       ],
       "notes": "allOtherFields because the HTTP node replaces the item json and would lose company_id."
@@ -232,21 +232,21 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1700,
+        2700,
         300
       ],
       "notes": "One request at a time by default. domain_fetch_log is the limit between runs; this is the limit inside one."
     },
     {
       "parameters": {
-        "jsCode": "// One item per fetched page arrives here. Group them back per company.\n//\n// The difference from WF-02's version of this node is what it keeps. WF-02\n// strips tags to plain text, which throws away every mailto: link on the page -\n// and a mailto: href is the single most reliable published address there is,\n// because a human put it there to be clicked. They are pulled out of the raw\n// HTML before anything is stripped.\n\nconst MAX_CHARS_PER_PAGE = 5000;\nconst MAX_CHARS_TOTAL = 20000;\nconst MAX_EMAILS = 40;\n\n// Deliberately narrow. A greedy pattern matches version strings, image hashes\n// and CSS selectors, and every false positive becomes something the verifier\n// has to reject later.\nconst EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g;\n\nfunction htmlToText(html) {\n  return String(html)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<!--[\\s\\S]*?-->/g, ' ')\n    .replace(/<\\/(p|div|li|h[1-6]|tr|section|article|td)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// Some sites write addresses as \"name (at) example.com\" to defeat scrapers.\n// Undoing that is reading what the page says, not defeating anything: the\n// address is published, and the obfuscation is aimed at bulk harvesters.\nfunction deobfuscate(text) {\n  return String(text)\n    .replace(/\\s*\\(\\s*at\\s*\\)\\s*/gi, '@')\n    .replace(/\\s*\\[\\s*at\\s*\\]\\s*/gi, '@')\n    .replace(/\\s+at\\s+([A-Za-z0-9.-]+)\\s+dot\\s+([A-Za-z]{2,})/gi, '@$1.$2')\n    .replace(/\\s*\\(\\s*dot\\s*\\)\\s*/gi, '.')\n    .replace(/\\s*\\[\\s*dot\\s*\\]\\s*/gi, '.');\n}\n\nconst pages = $input.all();\nconst context = $('Split URLs').all();\nconst byCompany = new Map();\n\nfor (let i = 0; i < pages.length; i++) {\n  const j = { ...context[i].json, ...(pages[i].json ?? {}) };\n  const key = j.company_id;\n  if (!key) continue;\n\n  if (!byCompany.has(key)) {\n    byCompany.set(key, {\n      agent_run_id: j.agent_run_id,\n      company_id: j.company_id,\n      name: j.name,\n      domain: j.domain,\n      base_url: j.base_url,\n      robots_blocked: j.robots_blocked ?? [],\n      sources: [],\n      fetch_failures: [],\n      sections: [],\n      emails: [],\n    });\n  }\n  const bucket = byCompany.get(key);\n\n  const res = pages[i].json ?? {};\n  const failed = res.error !== undefined || typeof res.data !== 'string' || res.data === '';\n  if (failed) {\n    const reason = res.error\n      ? (typeof res.error === 'string' ? res.error : (res.error.message ?? 'request failed'))\n      : 'empty response';\n    bucket.fetch_failures.push(j.url + ' (' + reason + ')');\n    continue;\n  }\n\n  const html = res.data;\n\n  // mailto: first, off the raw HTML, before the tags are gone.\n  for (const m of html.matchAll(/mailto:([^\"'?\\s>]+)/gi)) {\n    const address = decodeURIComponent(m[1]).trim().toLowerCase();\n    if (EMAIL_RE.test(address)) {\n      EMAIL_RE.lastIndex = 0;\n      bucket.emails.push({ email: address, source: j.url, from: 'mailto' });\n    }\n    EMAIL_RE.lastIndex = 0;\n  }\n\n  const text = deobfuscate(htmlToText(html));\n  for (const m of text.matchAll(EMAIL_RE)) {\n    bucket.emails.push({ email: m[0].trim().toLowerCase(), source: j.url, from: 'text' });\n  }\n\n  if (text.length < 40) {\n    bucket.fetch_failures.push(j.url + ' (no usable text)');\n    continue;\n  }\n\n  bucket.sources.push(j.url);\n  bucket.sections.push('### SOURCE: ' + j.url + '\\n' + text.slice(0, MAX_CHARS_PER_PAGE));\n}\n\nconst out = [];\nfor (const bucket of byCompany.values()) {\n  let material = bucket.sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n\n  // Deduplicate, keeping the first sighting of each address so its source is\n  // the page it was actually read from.\n  const seen = new Set();\n  const emails = [];\n  for (const e of bucket.emails) {\n    if (seen.has(e.email)) continue;\n    seen.add(e.email);\n    emails.push(e);\n    if (emails.length >= MAX_EMAILS) break;\n  }\n\n  const { sections, emails: _raw, ...rest } = bucket;\n  out.push({\n    json: {\n      ...rest,\n      material,\n      material_chars: material.length,\n      material_truncated: truncated,\n      pages_fetched: bucket.sources.length,\n      // The verifier checks model output against this, so it has to carry the\n      // addresses found in the raw HTML as well as the stripped text.\n      harvested_emails: emails,\n      // Truncation matters here: an address past the cut is not in the material\n      // the model saw, and the verifier would reject it as invented.\n      verification_haystack: (material + '\\n' + emails.map((e) => e.email).join('\\n')).toLowerCase(),\n    },\n  });\n}\n\nreturn out;\n"
+        "jsCode": "// One item per fetched page arrives here. Group them back per company.\n//\n// The difference from WF-02's version of this node is what it keeps. WF-02\n// strips tags to plain text, which throws away every mailto: link on the page -\n// and a mailto: href is the single most reliable published address there is,\n// because a human put it there to be clicked. They are pulled out of the raw\n// HTML before anything is stripped.\n\nconst MAX_CHARS_PER_PAGE = 5000;\nconst MAX_CHARS_TOTAL = 20000;\nconst MAX_EMAILS = 40;\n\n// Deliberately narrow. A greedy pattern matches version strings, image hashes\n// and CSS selectors, and every false positive becomes something the verifier\n// has to reject later.\nconst GH_LINK = /github\\.com\\/([A-Za-z0-9][A-Za-z0-9-]{0,38})(?![A-Za-z0-9-])/gi;\n\n// Paths under github.com that are GitHub's own, not a company account.\nconst GH_RESERVED = new Set([\n  'features', 'about', 'pricing', 'enterprise', 'login', 'join', 'marketplace',\n  'explore', 'topics', 'collections', 'events', 'sponsors', 'readme', 'orgs',\n  'apps', 'settings', 'site', 'security', 'customer-stories', 'trending',\n  'search', 'new', 'notifications', 'issues', 'pulls', 'codespaces', 'sitemap',\n]);\n\n// Addresses and names that belong to machinery rather than to a person.\n\nfunction harvestGithubLinks(html) {\n  const out = [];\n  GH_LINK.lastIndex = 0;\n  let m;\n  while ((m = GH_LINK.exec(String(html))) !== null) {\n    const slug = m[1];\n    if (GH_RESERVED.has(slug.toLowerCase())) continue;\n    if (!out.includes(slug)) out.push(slug);\n    if (out.length > 8) break;\n  }\n  return out;\n}\n\nconst EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g;\n\nfunction htmlToText(html) {\n  return String(html)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<!--[\\s\\S]*?-->/g, ' ')\n    .replace(/<\\/(p|div|li|h[1-6]|tr|section|article|td)>/gi, '\\n')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#0?39;|&apos;/gi, \"'\")\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\n\\s*\\n\\s*\\n+/g, '\\n\\n')\n    .trim();\n}\n\n// Some sites write addresses as \"name (at) example.com\" to defeat scrapers.\n// Undoing that is reading what the page says, not defeating anything: the\n// address is published, and the obfuscation is aimed at bulk harvesters.\nfunction deobfuscate(text) {\n  return String(text)\n    .replace(/\\s*\\(\\s*at\\s*\\)\\s*/gi, '@')\n    .replace(/\\s*\\[\\s*at\\s*\\]\\s*/gi, '@')\n    .replace(/\\s+at\\s+([A-Za-z0-9.-]+)\\s+dot\\s+([A-Za-z]{2,})/gi, '@$1.$2')\n    .replace(/\\s*\\(\\s*dot\\s*\\)\\s*/gi, '.')\n    .replace(/\\s*\\[\\s*dot\\s*\\]\\s*/gi, '.');\n}\n\nconst pages = $input.all();\nconst context = $('Split URLs').all();\nconst byCompany = new Map();\n\nfor (let i = 0; i < pages.length; i++) {\n  const j = { ...context[i].json, ...(pages[i].json ?? {}) };\n  const key = j.company_id;\n  if (!key) continue;\n\n  if (!byCompany.has(key)) {\n    byCompany.set(key, {\n      agent_run_id: j.agent_run_id,\n      company_id: j.company_id,\n      name: j.name,\n      domain: j.domain,\n      base_url: j.base_url,\n      robots_blocked: j.robots_blocked ?? [],\n      sources: [],\n      github_hints: [],\n      fetch_failures: [],\n      sections: [],\n      emails: [],\n    });\n  }\n  const bucket = byCompany.get(key);\n\n  const res = pages[i].json ?? {};\n  const failed = res.error !== undefined || typeof res.data !== 'string' || res.data === '';\n  if (failed) {\n    const reason = res.error\n      ? (typeof res.error === 'string' ? res.error : (res.error.message ?? 'request failed'))\n      : 'empty response';\n    bucket.fetch_failures.push(j.url + ' (' + reason + ')');\n    continue;\n  }\n\n  const html = res.data;\n\n  // mailto: first, off the raw HTML, before the tags are gone.\n  for (const m of html.matchAll(/mailto:([^\"'?\\s>]+)/gi)) {\n    const address = decodeURIComponent(m[1]).trim().toLowerCase();\n    if (EMAIL_RE.test(address)) {\n      EMAIL_RE.lastIndex = 0;\n      bucket.emails.push({ email: address, source: j.url, from: 'mailto' });\n    }\n    EMAIL_RE.lastIndex = 0;\n  }\n\n  const text = deobfuscate(htmlToText(html));\n  for (const m of text.matchAll(EMAIL_RE)) {\n    bucket.emails.push({ email: m[0].trim().toLowerCase(), source: j.url, from: 'text' });\n  }\n\n  if (text.length < 40) {\n    bucket.fetch_failures.push(j.url + ' (no usable text)');\n    continue;\n  }\n\n  // Off the raw markup: htmlToText drops the href, and the account name is in\n  // the href.\n  for (const slug of harvestGithubLinks(res.data)) {\n    if (!bucket.github_hints.includes(slug)) bucket.github_hints.push(slug);\n  }\n\n  bucket.sources.push(j.url);\n  bucket.sections.push('### SOURCE: ' + j.url + '\\n' + text.slice(0, MAX_CHARS_PER_PAGE));\n}\n\nconst out = [];\nfor (const bucket of byCompany.values()) {\n  let material = bucket.sections.join('\\n\\n');\n  let truncated = false;\n  if (material.length > MAX_CHARS_TOTAL) {\n    material = material.slice(0, MAX_CHARS_TOTAL);\n    truncated = true;\n  }\n\n  // Deduplicate, keeping the first sighting of each address so its source is\n  // the page it was actually read from.\n  const seen = new Set();\n  const emails = [];\n  for (const e of bucket.emails) {\n    if (seen.has(e.email)) continue;\n    seen.add(e.email);\n    emails.push(e);\n    if (emails.length >= MAX_EMAILS) break;\n  }\n\n  const { sections, emails: _raw, ...rest } = bucket;  // github_hints rides along in rest\n  out.push({\n    json: {\n      ...rest,\n      material,\n      material_chars: material.length,\n      material_truncated: truncated,\n      pages_fetched: bucket.sources.length,\n      // The verifier checks model output against this, so it has to carry the\n      // addresses found in the raw HTML as well as the stripped text.\n      harvested_emails: emails,\n      // Truncation matters here: an address past the cut is not in the material\n      // the model saw, and the verifier would reject it as invented.\n      verification_haystack: (material + '\\n' + emails.map((e) => e.email).join('\\n')).toLowerCase(),\n    },\n  });\n}\n\nreturn out;\n"
       },
       "id": "c0300000-0000-4000-8000-00000000000c",
       "name": "Group Material",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1900,
+        2900,
         300
       ],
       "notes": "Pulls mailto: addresses out of the raw HTML before the tags are stripped."
@@ -260,7 +260,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2100,
+        3100,
         300
       ],
       "notes": "Prompt and schema read from disk, so this node cannot drift from them."
@@ -281,21 +281,21 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2300,
+        3300,
         300
       ],
       "notes": "Local model, no cost. /v1/chat/completions because /api/chat ignores the schema - see docs/ollama.md."
     },
     {
       "parameters": {
-        "jsCode": "// Verify everything the model said against the pages it was given.\n//\n// docs/architecture.md: the rules that matter are enforced, not requested. The\n// prompt asks the model to transcribe rather than invent; this node is what\n// makes that true. Nothing here trusts a single field of the response.\n//\n// The stakes are not abstract. An address that nobody published goes to a real\n// person at a real company, and the first anyone hears of it is a bounce, a\n// spam complaint, or a reply asking who we are and where we got their details -\n// which under GDPR is a question with a required answer (docs/security.md).\n\nconst ROLE_LOCALPARTS = new Set([\n  'info', 'hello', 'contact', 'kontakt', 'office', 'mail', 'email', 'enquiries',\n  'inquiries', 'jobs', 'careers', 'career', 'recruiting', 'recruitment', 'hr',\n  'posao', 'sales', 'support', 'help', 'admin', 'press', 'media', 'marketing',\n  'billing', 'invoice', 'accounts', 'finance', 'legal', 'privacy', 'security',\n  'abuse', 'postmaster', 'webmaster', 'noreply', 'no-reply', 'donotreply',\n  'newsletter', 'team', 'partners', 'business', 'general',\n]);\n\nconst EMAIL_SHAPE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$/;\n\nconst SENIORITY = [\n  [/\\b(ceo|chief\\s|cto|cio|ciso|coo|cfo|founder|co-founder|owner|managing director)\\b/i, 'c_level'],\n  [/\\b(vp|vice president)\\b/i, 'vp'],\n  [/\\bhead of\\b/i, 'head'],\n  [/\\bdirector\\b/i, 'director'],\n  [/\\b(manager|lead engineer|engineering manager)\\b/i, 'manager'],\n  [/\\b(lead|principal|staff)\\b/i, 'lead'],\n  [/\\bsenior\\b/i, 'senior'],\n];\n\n// Fold a name to the letters an email address would use: strip diacritics, drop\n// everything that is not a letter. NFD handles c-caron and friends; d-stroke and\n// eszett do not decompose and have to be listed.\nfunction fold(value) {\n  return String(value || '')\n    .normalize('NFD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/đ/g, 'd')\n    .replace(/Đ/g, 'd')\n    .replace(/ß/g, 'ss')\n    .replace(/ø/g, 'o')\n    .replace(/ł/g, 'l')\n    .replace(/æ/g, 'ae')\n    .toLowerCase()\n    .replace(/[^a-z]/g, '');\n}\n\n// Ordered most specific first. A single observed address can match more than\n// one of these; the first match wins, so \"first\" and \"last\" alone sit at the\n// bottom where they cannot steal a match from a two-part pattern.\nconst PATTERNS = [\n  { id: 'first.last', build: (f, l) => (f && l ? f + '.' + l : null) },\n  { id: 'f.last',     build: (f, l) => (f && l ? f[0] + '.' + l : null) },\n  { id: 'first_last', build: (f, l) => (f && l ? f + '_' + l : null) },\n  { id: 'first-last', build: (f, l) => (f && l ? f + '-' + l : null) },\n  { id: 'firstlast',  build: (f, l) => (f && l ? f + l : null) },\n  { id: 'flast',      build: (f, l) => (f && l ? f[0] + l : null) },\n  { id: 'last.first', build: (f, l) => (f && l ? l + '.' + f : null) },\n  { id: 'lastf',      build: (f, l) => (f && l ? l + f[0] : null) },\n  { id: 'first',      build: (f) => f || null },\n  { id: 'last',       build: (f, l) => l || null },\n];\n\nfunction nameParts(fullName) {\n  const parts = String(fullName || '').trim().split(/\\s+/).filter(Boolean);\n  if (parts.length === 0) return { first: '', last: '' };\n  return { first: fold(parts[0]), last: fold(parts[parts.length - 1]) };\n}\n\nfunction seniorityFromTitle(title) {\n  for (const [re, value] of SENIORITY) if (re.test(String(title || ''))) return value;\n  return 'unknown';\n}\n\nconst claims = $('Claim Companies').all();\nconst material = $('Group Material').all();\nconst requests = $('Build Enrichment Request').all();\nconst responses = $input.all();\n\nconst out = [];\n\nfor (let i = 0; i < responses.length; i++) {\n  const req = requests[i].json;\n  const mat = material[i].json;\n  const res = responses[i].json ?? {};\n\n  const errors = [];\n  const notes = [];\n  const dropped = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  // ---- the response itself -------------------------------------------------\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Enrichment model request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n    const choice = Array.isArray(res.choices) ? res.choices[0] : null;\n    if (!choice) {\n      errors.push('Response contained no choices');\n    } else if (choice.finish_reason === 'length') {\n      errors.push('Response hit the token limit and is truncated. Use a model with a ' +\n        'larger context window (OLLAMA_ENRICHMENT_MODEL)');\n    } else {\n      raw = (choice.message && choice.message.content) || '';\n      if (!raw.trim()) errors.push('Model returned no text content');\n      else {\n        try { parsed = JSON.parse(raw); } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (errors.length) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, company_id: req.company_id,\n      name: req.name, domain: req.domain,\n      valid: false, has_people: false, run_status: 'error',\n      errors, error_message: errors.join('; '), notes: [], people: [], role_addresses: [],\n      dropped: [], pattern: null, raw_response: raw, model_output: parsed, usage,\n    } });\n    continue;\n  }\n\n  const haystack = String(mat.verification_haystack || '');\n  const domain = String(req.domain || '').toLowerCase();\n  const harvested = new Map((mat.harvested_emails || []).map((e) => [e.email, e.source]));\n\n  const onCompanyDomain = (email) => {\n    const at = email.lastIndexOf('@');\n    if (at === -1) return false;\n    const host = email.slice(at + 1);\n    return host === domain || host.endsWith('.' + domain);\n  };\n  const isRole = (email) => ROLE_LOCALPARTS.has(email.slice(0, email.indexOf('@')));\n\n  // An address is only accepted if the pages actually contain it. The harvest\n  // is the stronger check - it came out of the markup - but the haystack covers\n  // an address the harvester's pattern missed.\n  // A local model asked for a nullable field often answers with the string\n  // \"null\" rather than JSON null. Treating that as a rejected address filled\n  // the audit trail with drops for people who simply had no address, which\n  // makes the real drops - the invented ones - harder to see.\n  const ABSENT = new Set(['', 'null', 'none', 'n/a', 'na', 'unknown', 'undefined', '-']);\n\n  function acceptEmail(candidate, who) {\n    if (!candidate) return null;\n    const email = String(candidate).trim().toLowerCase();\n    if (ABSENT.has(email)) return null;\n    if (!EMAIL_SHAPE.test(email)) { dropped.push(who + ': \"' + candidate + '\" is not an address'); return null; }\n    if (!harvested.has(email) && !haystack.includes(email)) {\n      dropped.push(who + ': address \"' + email + '\" does not appear on any fetched page');\n      return null;\n    }\n    if (!onCompanyDomain(email)) {\n      dropped.push(who + ': address \"' + email + '\" is not on ' + domain);\n      return null;\n    }\n    return email;\n  }\n\n  // ---- people --------------------------------------------------------------\n  const rawPeople = Array.isArray(parsed.people) ? parsed.people : [];\n  const people = [];\n  const usedEmails = new Set();\n\n  for (const p of rawPeople) {\n    const fullName = String(p.full_name || '').trim().replace(/\\s+/g, ' ');\n    if (fullName.length < 3 || !/\\s/.test(fullName)) {\n      dropped.push('person \"' + fullName + '\": not a full name');\n      continue;\n    }\n    // An invented person cannot survive this. Whitespace is normalised on both\n    // sides because a name can be split across markup.\n    const foldedName = fullName.toLowerCase();\n    const firstWord = foldedName.split(' ')[0];\n    const lastWord = foldedName.split(' ').pop();\n    if (!haystack.includes(foldedName) && !(haystack.includes(firstWord) && haystack.includes(lastWord))) {\n      dropped.push('person \"' + fullName + '\": name does not appear on any fetched page');\n      continue;\n    }\n\n    let title = p.title === null || p.title === undefined ? null : String(p.title).trim();\n    if (title && !haystack.includes(title.toLowerCase())) {\n      notes.push('title \"' + title + '\" for ' + fullName + ' is not on the page; dropped');\n      title = null;\n    }\n\n    let email = acceptEmail(p.email, 'person \"' + fullName + '\"');\n    if (email && isRole(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' is a role address, not a person');\n      email = null;\n    }\n    if (email && usedEmails.has(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' was already claimed by another person');\n      email = null;\n    }\n    if (email) usedEmails.add(email);\n\n    const parts = fullName.split(' ');\n    people.push({\n      full_name: fullName,\n      first_name: parts[0],\n      last_name: parts.length > 1 ? parts[parts.length - 1] : null,\n      title,\n      seniority: seniorityFromTitle(title),\n      email,\n      email_status: email ? 'valid' : 'unknown',\n      linkedin_url: typeof p.linkedin_url === 'string' && /^https?:\\/\\/(www\\.)?linkedin\\.com\\//i.test(p.linkedin_url)\n        ? p.linkedin_url : null,\n      source_url: email ? (harvested.get(email) || String(p.source || '')) : String(p.source || ''),\n      discovery_method: email ? 'published_page' : null,\n    });\n  }\n\n  // ---- role addresses ------------------------------------------------------\n  // Recorded, never written to people: a role address has no person behind it,\n  // and inventing one to satisfy a NOT NULL column would put \"Careers team\" in\n  // the greeting of an email.\n  const roleAddresses = [];\n  for (const r of (Array.isArray(parsed.role_addresses) ? parsed.role_addresses : [])) {\n    const email = acceptEmail(r.email, 'role address');\n    if (!email) continue;\n    roleAddresses.push({ email, purpose: r.purpose ? String(r.purpose).slice(0, 120) : null,\n                         source: harvested.get(email) || String(r.source || '') });\n  }\n\n  // ---- pattern inference ---------------------------------------------------\n  // The one place an address is produced rather than read, and it only happens\n  // when this company's own site already showed one built the same way.\n  //\n  // Scoring across every observed pair, not just the first: two people whose\n  // addresses disagree about the pattern means there is no pattern, and\n  // guessing anyway is how you write to somebody who does not exist.\n  const observed = people.filter((p) => p.email && p.first_name && p.last_name);\n  const tally = new Map();\n  for (const p of observed) {\n    const local = p.email.slice(0, p.email.indexOf('@'));\n    const { first, last } = nameParts(p.full_name);\n    for (const pattern of PATTERNS) {\n      if (pattern.build(first, last) === local) {\n        tally.set(pattern.id, (tally.get(pattern.id) || 0) + 1);\n        break; // first match only: the list is ordered most specific first\n      }\n    }\n  }\n\n  let chosen = null;\n  if (tally.size > 0) {\n    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]);\n    if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) {\n      chosen = ranked[0][0];\n    } else {\n      notes.push('observed addresses disagree about the pattern (' +\n        ranked.map(([id, n]) => id + ' x' + n).join(', ') + '); nothing was derived');\n    }\n  }\n\n  let derived = 0;\n  if (chosen) {\n    const builder = PATTERNS.find((p) => p.id === chosen);\n    const example = observed.find((p) => {\n      const { first, last } = nameParts(p.full_name);\n      return builder.build(first, last) === p.email.slice(0, p.email.indexOf('@'));\n    });\n    for (const p of people) {\n      if (p.email) continue;\n      const { first, last } = nameParts(p.full_name);\n      const local = builder.build(first, last);\n      if (!local || local.length < 2) continue;\n      const candidate = local + '@' + domain;\n      if (usedEmails.has(candidate) || harvested.has(candidate)) continue;\n      usedEmails.add(candidate);\n      p.email = candidate;\n      p.email_status = 'guessed';\n      p.discovery_method = 'pattern_inferred';\n      // The source is the page that proved the pattern, not a page containing\n      // this address - there is none, and pretending otherwise would make\n      // source_url a lie.\n      p.source_url = example ? example.source_url : (mat.sources || [])[0] || null;\n      derived += 1;\n    }\n    notes.push('address pattern \"' + chosen + '\" observed in ' + tally.get(chosen) +\n      ' published address(es); ' + derived + ' further address(es) derived from it');\n  } else if (people.some((p) => !p.email)) {\n    notes.push('no address pattern could be observed on this domain, so no address was derived');\n  }\n\n  if (rawPeople.length && !people.length) {\n    notes.push('every person the model returned failed verification; treated as nothing found');\n  }\n  if (!mat.pages_fetched) {\n    notes.push('no page was readable: ' + (mat.fetch_failures || []).slice(0, 3).join(', '));\n  }\n\n  out.push({ json: {\n    agent_run_id: req.agent_run_id,\n    company_id: req.company_id,\n    name: req.name,\n    domain: req.domain,\n    valid: true,\n    has_people: people.length > 0,\n    run_status: people.length > 0 ? 'success' : 'skipped',\n    errors: [],\n    error_message: null,\n    notes,\n    people,\n    role_addresses: roleAddresses,\n    dropped,\n    pattern: chosen,\n    derived_count: derived,\n    pages_fetched: mat.pages_fetched,\n    sources: mat.sources,\n    raw_response: raw,\n    model_output: parsed,\n    usage,\n  } });\n}\n\nreturn out;\n"
+        "jsCode": "// Verify everything the model said against the pages it was given.\n//\n// docs/architecture.md: the rules that matter are enforced, not requested. The\n// prompt asks the model to transcribe rather than invent; this node is what\n// makes that true. Nothing here trusts a single field of the response.\n//\n// The stakes are not abstract. An address that nobody published goes to a real\n// person at a real company, and the first anyone hears of it is a bounce, a\n// spam complaint, or a reply asking who we are and where we got their details -\n// which under GDPR is a question with a required answer (docs/security.md).\n\nconst ROLE_LOCALPARTS = new Set([\n  'info', 'hello', 'contact', 'kontakt', 'office', 'mail', 'email', 'enquiries',\n  'inquiries', 'jobs', 'careers', 'career', 'recruiting', 'recruitment', 'hr',\n  'posao', 'sales', 'support', 'help', 'admin', 'press', 'media', 'marketing',\n  'billing', 'invoice', 'accounts', 'finance', 'legal', 'privacy', 'security',\n  'abuse', 'postmaster', 'webmaster', 'noreply', 'no-reply', 'donotreply',\n  'newsletter', 'team', 'partners', 'business', 'general',\n]);\n\nconst EMAIL_SHAPE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$/;\n\nconst SENIORITY = [\n  [/\\b(ceo|chief\\s|cto|cio|ciso|coo|cfo|founder|co-founder|owner|managing director)\\b/i, 'c_level'],\n  [/\\b(vp|vice president)\\b/i, 'vp'],\n  [/\\bhead of\\b/i, 'head'],\n  [/\\bdirector\\b/i, 'director'],\n  [/\\b(manager|lead engineer|engineering manager)\\b/i, 'manager'],\n  [/\\b(lead|principal|staff)\\b/i, 'lead'],\n  [/\\bsenior\\b/i, 'senior'],\n];\n\n// Fold a name to the letters an email address would use: strip diacritics, drop\n// everything that is not a letter. NFD handles c-caron and friends; d-stroke and\n// eszett do not decompose and have to be listed.\nfunction fold(value) {\n  return String(value || '')\n    .normalize('NFD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/đ/g, 'd')\n    .replace(/Đ/g, 'd')\n    .replace(/ß/g, 'ss')\n    .replace(/ø/g, 'o')\n    .replace(/ł/g, 'l')\n    .replace(/æ/g, 'ae')\n    .toLowerCase()\n    .replace(/[^a-z]/g, '');\n}\n\n// Ordered most specific first. A single observed address can match more than\n// one of these; the first match wins, so \"first\" and \"last\" alone sit at the\n// bottom where they cannot steal a match from a two-part pattern.\nconst PATTERNS = [\n  { id: 'first.last', build: (f, l) => (f && l ? f + '.' + l : null) },\n  { id: 'f.last',     build: (f, l) => (f && l ? f[0] + '.' + l : null) },\n  { id: 'first_last', build: (f, l) => (f && l ? f + '_' + l : null) },\n  { id: 'first-last', build: (f, l) => (f && l ? f + '-' + l : null) },\n  { id: 'firstlast',  build: (f, l) => (f && l ? f + l : null) },\n  { id: 'flast',      build: (f, l) => (f && l ? f[0] + l : null) },\n  { id: 'last.first', build: (f, l) => (f && l ? l + '.' + f : null) },\n  { id: 'lastf',      build: (f, l) => (f && l ? l + f[0] : null) },\n  { id: 'first',      build: (f) => f || null },\n  { id: 'last',       build: (f, l) => l || null },\n];\n\nfunction nameParts(fullName) {\n  const parts = String(fullName || '').trim().split(/\\s+/).filter(Boolean);\n  if (parts.length === 0) return { first: '', last: '' };\n  return { first: fold(parts[0]), last: fold(parts[parts.length - 1]) };\n}\n\nfunction seniorityFromTitle(title) {\n  for (const [re, value] of SENIORITY) if (re.test(String(title || ''))) return value;\n  return 'unknown';\n}\n\nconst claims = $('Claim Companies').all();\nconst material = $('Merge GitHub Contacts').all();\nconst requests = $('Build Enrichment Request').all();\nconst responses = $input.all();\n\nconst out = [];\n\nfor (let i = 0; i < responses.length; i++) {\n  const req = requests[i].json;\n  const mat = material[i].json;\n  const res = responses[i].json ?? {};\n\n  const errors = [];\n  const notes = [];\n  const dropped = [];\n  let parsed = null;\n  let raw = '';\n  let usage = null;\n\n  // ---- the response itself -------------------------------------------------\n  if (res.error !== undefined) {\n    const e = res.error;\n    errors.push('Enrichment model request failed: ' +\n      (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)));\n  } else {\n    usage = res.usage ?? null;\n    const choice = Array.isArray(res.choices) ? res.choices[0] : null;\n    if (!choice) {\n      errors.push('Response contained no choices');\n    } else if (choice.finish_reason === 'length') {\n      errors.push('Response hit the token limit and is truncated. Use a model with a ' +\n        'larger context window (OLLAMA_ENRICHMENT_MODEL)');\n    } else {\n      raw = (choice.message && choice.message.content) || '';\n      if (!raw.trim()) errors.push('Model returned no text content');\n      else {\n        try { parsed = JSON.parse(raw); } catch (e) {\n          errors.push('Response is not valid JSON: ' + e.message);\n        }\n      }\n    }\n  }\n  if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {\n    errors.push('Response is valid JSON but not a JSON object');\n    parsed = null;\n  }\n\n  if (errors.length) {\n    out.push({ json: {\n      agent_run_id: req.agent_run_id, company_id: req.company_id,\n      name: req.name, domain: req.domain,\n      valid: false, has_people: false, run_status: 'error',\n      errors, error_message: errors.join('; '), notes: [], people: [], role_addresses: [],\n      dropped: [], pattern: null, raw_response: raw, model_output: parsed, usage,\n    } });\n    continue;\n  }\n\n  const haystack = String(mat.verification_haystack || '');\n  const domain = String(req.domain || '').toLowerCase();\n  const harvested = new Map((mat.harvested_emails || []).map((e) => [e.email, e.source]));\n\n  const onCompanyDomain = (email) => {\n    const at = email.lastIndexOf('@');\n    if (at === -1) return false;\n    const host = email.slice(at + 1);\n    return host === domain || host.endsWith('.' + domain);\n  };\n  const isRole = (email) => ROLE_LOCALPARTS.has(email.slice(0, email.indexOf('@')));\n\n  // An address is only accepted if the pages actually contain it. The harvest\n  // is the stronger check - it came out of the markup - but the haystack covers\n  // an address the harvester's pattern missed.\n  // A local model asked for a nullable field often answers with the string\n  // \"null\" rather than JSON null. Treating that as a rejected address filled\n  // the audit trail with drops for people who simply had no address, which\n  // makes the real drops - the invented ones - harder to see.\n  const ABSENT = new Set(['', 'null', 'none', 'n/a', 'na', 'unknown', 'undefined', '-']);\n\n  function acceptEmail(candidate, who) {\n    if (!candidate) return null;\n    const email = String(candidate).trim().toLowerCase();\n    if (ABSENT.has(email)) return null;\n    if (!EMAIL_SHAPE.test(email)) { dropped.push(who + ': \"' + candidate + '\" is not an address'); return null; }\n    if (!harvested.has(email) && !haystack.includes(email)) {\n      dropped.push(who + ': address \"' + email + '\" does not appear on any fetched page');\n      return null;\n    }\n    if (!onCompanyDomain(email)) {\n      dropped.push(who + ': address \"' + email + '\" is not on ' + domain);\n      return null;\n    }\n    return email;\n  }\n\n  // ---- people --------------------------------------------------------------\n  const rawPeople = Array.isArray(parsed.people) ? parsed.people : [];\n  const people = [];\n  const usedEmails = new Set();\n\n  for (const p of rawPeople) {\n    const fullName = String(p.full_name || '').trim().replace(/\\s+/g, ' ');\n    if (fullName.length < 3 || !/\\s/.test(fullName)) {\n      dropped.push('person \"' + fullName + '\": not a full name');\n      continue;\n    }\n    // An invented person cannot survive this. Whitespace is normalised on both\n    // sides because a name can be split across markup.\n    const foldedName = fullName.toLowerCase();\n    const firstWord = foldedName.split(' ')[0];\n    const lastWord = foldedName.split(' ').pop();\n    if (!haystack.includes(foldedName) && !(haystack.includes(firstWord) && haystack.includes(lastWord))) {\n      dropped.push('person \"' + fullName + '\": name does not appear on any fetched page');\n      continue;\n    }\n\n    let title = p.title === null || p.title === undefined ? null : String(p.title).trim();\n    if (title && !haystack.includes(title.toLowerCase())) {\n      notes.push('title \"' + title + '\" for ' + fullName + ' is not on the page; dropped');\n      title = null;\n    }\n\n    let email = acceptEmail(p.email, 'person \"' + fullName + '\"');\n    if (email && isRole(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' is a role address, not a person');\n      email = null;\n    }\n    if (email && usedEmails.has(email)) {\n      dropped.push('person \"' + fullName + '\": ' + email + ' was already claimed by another person');\n      email = null;\n    }\n    if (email) usedEmails.add(email);\n\n    const parts = fullName.split(' ');\n    people.push({\n      full_name: fullName,\n      first_name: parts[0],\n      last_name: parts.length > 1 ? parts[parts.length - 1] : null,\n      title,\n      seniority: seniorityFromTitle(title),\n      email,\n      email_status: email ? 'valid' : 'unknown',\n      linkedin_url: typeof p.linkedin_url === 'string' && /^https?:\\/\\/(www\\.)?linkedin\\.com\\//i.test(p.linkedin_url)\n        ? p.linkedin_url : null,\n      source_url: email ? (harvested.get(email) || String(p.source || '')) : String(p.source || ''),\n      discovery_method: email ? 'published_page' : null,\n    });\n  }\n\n  // ---- contacts observed in the company's own repositories ----------------\n  // Not model output, so not verified against the pages: each pair is a name\n  // and an address that git recorded together in a commit on this company's\n  // own repository. That is the observation docs/security.md requires before\n  // any address may be derived, and the website never provides it - eleven\n  // companies of this profile were checked and none published one.\n  //\n  // These are appended rather than merged over the model's people: a person the\n  // model already found keeps the title it read off the page.\n  for (const g of (Array.isArray(mat.github_people) ? mat.github_people : [])) {\n    const email = String(g.email || '').toLowerCase();\n    const fullName = String(g.full_name || '').trim();\n    if (!email || !fullName) continue;\n    if (usedEmails.has(email)) continue;\n    if (isRole(email)) continue;\n    // The unique index is on (company_id, lower(trim(full_name))), so a name\n    // the model already reported must not be inserted twice.\n    if (people.some((p) => p.full_name.trim().toLowerCase() === fullName.toLowerCase())) continue;\n    usedEmails.add(email);\n\n    const parts = fullName.split(/\\s+/);\n    people.push({\n      full_name: fullName,\n      first_name: parts[0],\n      last_name: parts.length > 1 ? parts[parts.length - 1] : null,\n      title: null,\n      seniority: null,\n      email,\n      email_status: 'valid',\n      linkedin_url: null,\n      source_url: String(g.source_url || ''),\n      discovery_method: 'published_page',\n    });\n  }\n  if ((mat.github_people || []).length) {\n    notes.push('observed ' + mat.github_people.length + ' address(es) in commits on ' +\n      (mat.github_org ? 'github.com/' + mat.github_org : 'the company repositories') +\n      ' (account found by ' + (mat.github_org_via || 'unknown') + ')');\n  }\n\n  // ---- role addresses ------------------------------------------------------\n  // Recorded, never written to people: a role address has no person behind it,\n  // and inventing one to satisfy a NOT NULL column would put \"Careers team\" in\n  // the greeting of an email.\n  const roleAddresses = [];\n  for (const r of (Array.isArray(parsed.role_addresses) ? parsed.role_addresses : [])) {\n    const email = acceptEmail(r.email, 'role address');\n    if (!email) continue;\n    roleAddresses.push({ email, purpose: r.purpose ? String(r.purpose).slice(0, 120) : null,\n                         source: harvested.get(email) || String(r.source || '') });\n  }\n\n  // ---- pattern inference ---------------------------------------------------\n  // The one place an address is produced rather than read, and it only happens\n  // when this company's own site already showed one built the same way.\n  //\n  // Scoring across every observed pair, not just the first: two people whose\n  // addresses disagree about the pattern means there is no pattern, and\n  // guessing anyway is how you write to somebody who does not exist.\n  const observed = people.filter((p) => p.email && p.first_name && p.last_name);\n  const tally = new Map();\n  for (const p of observed) {\n    const local = p.email.slice(0, p.email.indexOf('@'));\n    const { first, last } = nameParts(p.full_name);\n    for (const pattern of PATTERNS) {\n      if (pattern.build(first, last) === local) {\n        tally.set(pattern.id, (tally.get(pattern.id) || 0) + 1);\n        break; // first match only: the list is ordered most specific first\n      }\n    }\n  }\n\n  let chosen = null;\n  if (tally.size > 0) {\n    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]);\n    if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) {\n      chosen = ranked[0][0];\n    } else {\n      notes.push('observed addresses disagree about the pattern (' +\n        ranked.map(([id, n]) => id + ' x' + n).join(', ') + '); nothing was derived');\n    }\n  }\n\n  let derived = 0;\n  if (chosen) {\n    const builder = PATTERNS.find((p) => p.id === chosen);\n    const example = observed.find((p) => {\n      const { first, last } = nameParts(p.full_name);\n      return builder.build(first, last) === p.email.slice(0, p.email.indexOf('@'));\n    });\n    for (const p of people) {\n      if (p.email) continue;\n      const { first, last } = nameParts(p.full_name);\n      const local = builder.build(first, last);\n      if (!local || local.length < 2) continue;\n      const candidate = local + '@' + domain;\n      if (usedEmails.has(candidate) || harvested.has(candidate)) continue;\n      usedEmails.add(candidate);\n      p.email = candidate;\n      p.email_status = 'guessed';\n      p.discovery_method = 'pattern_inferred';\n      // The source is the page that proved the pattern, not a page containing\n      // this address - there is none, and pretending otherwise would make\n      // source_url a lie.\n      p.source_url = example ? example.source_url : (mat.sources || [])[0] || null;\n      derived += 1;\n    }\n    notes.push('address pattern \"' + chosen + '\" observed in ' + tally.get(chosen) +\n      ' published address(es); ' + derived + ' further address(es) derived from it');\n  } else if (people.some((p) => !p.email)) {\n    notes.push('no address pattern could be observed on this domain, so no address was derived');\n  }\n\n  if (rawPeople.length && !people.length) {\n    notes.push('every person the model returned failed verification; treated as nothing found');\n  }\n  if (!mat.pages_fetched) {\n    notes.push('no page was readable: ' + (mat.fetch_failures || []).slice(0, 3).join(', '));\n  }\n\n  out.push({ json: {\n    agent_run_id: req.agent_run_id,\n    company_id: req.company_id,\n    name: req.name,\n    domain: req.domain,\n    valid: true,\n    has_people: people.length > 0,\n    run_status: people.length > 0 ? 'success' : 'skipped',\n    errors: [],\n    error_message: null,\n    notes,\n    people,\n    role_addresses: roleAddresses,\n    dropped,\n    pattern: chosen,\n    derived_count: derived,\n    pages_fetched: mat.pages_fetched,\n    sources: mat.sources,\n    raw_response: raw,\n    model_output: parsed,\n    usage,\n  } });\n}\n\nreturn out;\n"
       },
       "id": "c0300000-0000-4000-8000-00000000000f",
       "name": "Validate And Verify",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2500,
+        3500,
         300
       ],
       "notes": "Every name and every address is checked against the fetched pages. This node is the whole point of the workflow."
@@ -330,7 +330,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        2700,
+        3700,
         300
       ],
       "notes": "False means the model failed, not that nothing was found."
@@ -365,7 +365,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        2900,
+        3900,
         200
       ],
       "notes": "Nothing found is a normal outcome and is recorded as 'skipped', not as an error."
@@ -383,7 +383,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3120,
+        4120,
         100
       ],
       "credentials": {
@@ -407,7 +407,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3340,
+        4340,
         100
       ],
       "credentials": {
@@ -485,7 +485,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        3560,
+        4560,
         100
       ],
       "notes": "A run that found people. company_status should read 'researched'."
@@ -503,7 +503,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        3120,
+        4120,
         420
       ],
       "credentials": {
@@ -569,10 +569,155 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        3340,
+        4340,
         420
       ],
       "notes": "No contact found is a normal outcome, not a failure."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Which GitHub accounts might belong to this company.\n//\n// Measured over eleven companies of this profile, not one published a personal\n// address on its own website, so WF-03 could never observe the pattern its own\n// inference step needs. Their engineers' work addresses are in the commit\n// metadata of the company's public repositories, which is public by\n// construction: git puts the author address in the commit object.\n\nconst GH_LINK = /github\\.com\\/([A-Za-z0-9][A-Za-z0-9-]{0,38})(?![A-Za-z0-9-])/gi;\n\n// Paths under github.com that are GitHub's own, not a company account.\nconst GH_RESERVED = new Set([\n  'features', 'about', 'pricing', 'enterprise', 'login', 'join', 'marketplace',\n  'explore', 'topics', 'collections', 'events', 'sponsors', 'readme', 'orgs',\n  'apps', 'settings', 'site', 'security', 'customer-stories', 'trending',\n  'search', 'new', 'notifications', 'issues', 'pulls', 'codespaces', 'sitemap',\n]);\n\n// Addresses and names that belong to machinery rather than to a person.\n\n// A link on the company's own site beats a guess, so when there is one the\n// guesses are not tried: the GitHub API allows 60 calls an hour without a\n// token and every wasted call is one a real company does not get.\nfunction orgCandidates(domain, hints, max) {\n  const seen = new Set();\n  const out = [];\n  const push = (org, via) => {\n    const key = org.toLowerCase();\n    if (!org || seen.has(key)) return;\n    seen.add(key);\n    out.push({ org, via });\n  };\n  for (const h of hints || []) push(h, 'link');\n  if (out.length) return out.slice(0, max);\n\n  const d = String(domain || '').toLowerCase();\n  const label = d.split('.')[0].replace(/[^a-z0-9-]/g, '');\n  const tld = d.split('.').slice(1).join('');\n  if (label.length >= 2) {\n    push(label, 'guess');\n    // smartly.io's account is \"smartlyio\" and miro.com's is \"miroapp\": brands\n    // that read the domain as one word are common enough to be worth one call.\n    if (tld && tld.length <= 3) push(label + tld, 'guess');\n    if (label.includes('-')) push(label.replace(/-/g, ''), 'guess');\n  }\n  return out.slice(0, max);\n}\n\nconst MAX_ORGS = Number($env.ENRICH_GITHUB_MAX_ORGS || 3);\nconst out = [];\n\nfor (const item of $input.all()) {\n  const c = item.json;\n  if (String($env.ENRICH_GITHUB_ENABLED || 'true') !== 'true') continue;\n  for (const cand of orgCandidates(c.domain, c.github_hints || [], MAX_ORGS)) {\n    out.push({ json: {\n      company_id: c.company_id,\n      domain: c.domain,\n      gh_org: cand.org,\n      gh_via: cand.via,\n      url: 'https://api.github.com/orgs/' + encodeURIComponent(cand.org) + '/repos?sort=pushed&per_page=5',\n    } });\n  }\n}\n\n// Never return empty: this is a fan-out and an empty branch would drop every\n// company out of the run rather than merely leaving it without contacts.\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/orgs/__none__/repos' } });\n}\n\nreturn out;\n"
+      },
+      "id": "gh-candidates",
+      "name": "GitHub Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $env.GITHUB_TOKEN ? 'Bearer ' + $env.GITHUB_TOKEN : undefined }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 2
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": "={{ Number($env.ENRICH_GITHUB_INTERVAL_MS || 400) }}"
+            }
+          }
+        }
+      },
+      "id": "fetch-gh-repos",
+      "name": "Fetch GitHub Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "notes": "Public GitHub API. GITHUB_TOKEN is optional: without it the limit is 60 calls an hour, which fits ENRICH_BATCH_SIZE=3 hourly and little more."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Choose the account that answered, and ask it for commits.\n//\n// The unauthenticated GitHub API allows 60 calls an hour. A company costs one\n// call per candidate account plus one per repository read, so the candidate\n// list is kept short and a repository with no recent pushes is not read at all.\n\nconst MAX_REPOS = Number($env.ENRICH_GITHUB_MAX_REPOS || 3);\nconst COMMITS_PER_REPO = Number($env.ENRICH_GITHUB_COMMITS_PER_REPO || 40);\n\nconst candidates = $('GitHub Candidates').all();\nconst responses = $input.all();\n\n// company_id -> the first candidate account that returned repositories\nconst chosen = new Map();\nconst rate = { remaining: null };\n\nfor (let i = 0; i < responses.length; i++) {\n  const cand = (candidates[i] && candidates[i].json) || {};\n  if (!cand.company_id) continue;\n  if (chosen.has(cand.company_id)) continue;\n\n  const res = (responses[i] && responses[i].json) || {};\n  const body = typeof res.data === 'string' ? res.data : '';\n  if (!body) continue;\n  let repos;\n  try { repos = JSON.parse(body); } catch { continue; }\n  if (!Array.isArray(repos) || !repos.length) continue;\n\n  chosen.set(cand.company_id, { cand, repos });\n}\n\nconst out = [];\nfor (const [companyId, { cand, repos }] of chosen) {\n  const usable = repos\n    .filter((r) => r && r.name && !r.archived && !r.fork)\n    .slice(0, MAX_REPOS);\n  for (const r of usable) {\n    out.push({ json: {\n      company_id: companyId,\n      domain: cand.domain,\n      gh_org: cand.gh_org,\n      gh_via: cand.gh_via,\n      repo: r.name,\n      url: 'https://api.github.com/repos/' + encodeURIComponent(cand.gh_org) +\n           '/' + encodeURIComponent(r.name) + '/commits?per_page=' + COMMITS_PER_REPO,\n    } });\n  }\n}\n\nif (!out.length) {\n  out.push({ json: { company_id: null, gh_noop: true,\n    url: 'https://api.github.com/repos/__none__/__none__/commits' } });\n}\n\nreturn out;\n"
+      },
+      "id": "pick-repos",
+      "name": "Pick Repos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "AiSalesMachineBot/1.0 (+https://github.com/urosorolicki/ai-sales)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $env.GITHUB_TOKEN ? 'Bearer ' + $env.GITHUB_TOKEN : undefined }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 2
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": "={{ Number($env.ENRICH_GITHUB_INTERVAL_MS || 400) }}"
+            }
+          }
+        }
+      },
+      "id": "fetch-gh-commits",
+      "name": "Fetch GitHub Commits",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        300
+      ],
+      "notes": "Commit metadata only. The author address is part of the commit object."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn commit authors into observed contacts for this company.\n//\n// These are not model output and are not guesses: each one is a name and an\n// address that appeared together in a commit on the company's own repository.\n// They are handed to Validate And Verify as already-verified, which is what\n// lets its existing pattern inference run at all - docs/security.md requires a\n// real address observed on the domain before any address may be derived.\n\nconst MACHINE = /(^|[^a-z])(bot|ci|cd|jenkins|travis|circleci|actions|deploy|release|automation|renovate|dependabot|snyk|greenkeeper|semantic-release)([^a-z]|$)|noreply|no-reply|^git@|^root@|^admin@/i;\n\nfunction fold(s) {\n  return String(s || '')\n    .normalize('NFD').replace(/[̀-ͯ]/g, '')\n    .replace(/đ/gi, 'd').replace(/ß/g, 'ss').replace(/ø/gi, 'o')\n    .replace(/ł/gi, 'l').replace(/æ/gi, 'ae')\n    .toLowerCase().replace(/[^a-z]/g, '');\n}\n\n// Pull (name, address, commit url) out of a commits listing, keeping only\n// addresses on the company's own domain and only humans.\nfunction commitAuthors(commits, domain) {\n  const byEmail = new Map();\n  if (!Array.isArray(commits)) return [];\n  const dom = String(domain || '').toLowerCase();\n  for (const cm of commits) {\n    const c = (cm && cm.commit) || {};\n    for (const who of [c.author, c.committer]) {\n      const email = String((who && who.email) || '').trim().toLowerCase();\n      const name = String((who && who.name) || '').trim();\n      if (!email || !name) continue;\n      const host = email.slice(email.lastIndexOf('@') + 1);\n      if (host !== dom && !host.endsWith('.' + dom)) continue;\n      if (MACHINE.test(email) || MACHINE.test(name)) continue;\n      // A single word is a handle, not a name, and the pattern check needs\n      // both halves to prove anything.\n      const parts = name.split(/\\s+/).filter(Boolean);\n      if (parts.length < 2) continue;\n      if (!fold(parts[0]) || !fold(parts[parts.length - 1])) continue;\n      if (!byEmail.has(email)) {\n        byEmail.set(email, { full_name: name, email, source_url: cm.html_url || '' });\n      }\n    }\n  }\n  return [...byEmail.values()];\n}\n\nconst MAX_PEOPLE = Number($env.ENRICH_GITHUB_MAX_PEOPLE || 12);\n\nconst companies = $('Group Material').all();\nconst requests = $('Pick Repos').all();\nconst responses = $input.all();\n\nconst byCompany = new Map();\nconst orgOf = new Map();\n\nfor (let i = 0; i < responses.length; i++) {\n  const req = (requests[i] && requests[i].json) || {};\n  if (!req.company_id) continue;\n  orgOf.set(req.company_id, { org: req.gh_org, via: req.gh_via });\n\n  const res = (responses[i] && responses[i].json) || {};\n  const body = typeof res.data === 'string' ? res.data : '';\n  if (!body) continue;\n  let commits;\n  try { commits = JSON.parse(body); } catch { continue; }\n\n  if (!byCompany.has(req.company_id)) byCompany.set(req.company_id, new Map());\n  const bucket = byCompany.get(req.company_id);\n  for (const a of commitAuthors(commits, req.domain)) {\n    if (!bucket.has(a.email)) bucket.set(a.email, a);\n  }\n}\n\nconst out = [];\nfor (const item of companies) {\n  const c = { ...item.json };\n  const found = [...(byCompany.get(c.company_id) || new Map()).values()].slice(0, MAX_PEOPLE);\n  const org = orgOf.get(c.company_id) || {};\n\n  const harvested = Array.isArray(c.harvested_emails) ? c.harvested_emails.slice() : [];\n  let haystack = String(c.verification_haystack || '');\n\n  if (found.length) {\n    for (const p of found) {\n      if (!harvested.some((h) => h.email === p.email)) {\n        harvested.push({ email: p.email, source: p.source_url });\n      }\n      haystack += '\\n' + p.full_name.toLowerCase() + '\\n' + p.email;\n    }\n  }\n\n  const { github_hints: _drop, ...rest } = c;\n  out.push({ json: {\n    ...rest,\n    harvested_emails: harvested,\n    verification_haystack: haystack,\n    github_people: found,\n    github_org: org.org || null,\n    github_org_via: org.via || null,\n    github_people_count: found.length,\n  } });\n}\n\nreturn out;\n"
+      },
+      "id": "merge-gh",
+      "name": "Merge GitHub Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        300
+      ]
     }
   ],
   "connections": {
@@ -701,7 +846,7 @@
       "main": [
         [
           {
-            "node": "Build Enrichment Request",
+            "node": "GitHub Candidates",
             "type": "main",
             "index": 0
           }
@@ -804,6 +949,61 @@
         [
           {
             "node": "Released",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GitHub Candidates": {
+      "main": [
+        [
+          {
+            "node": "Fetch GitHub Repos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch GitHub Repos": {
+      "main": [
+        [
+          {
+            "node": "Pick Repos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Repos": {
+      "main": [
+        [
+          {
+            "node": "Fetch GitHub Commits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch GitHub Commits": {
+      "main": [
+        [
+          {
+            "node": "Merge GitHub Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge GitHub Contacts": {
+      "main": [
+        [
+          {
+            "node": "Build Enrichment Request",
             "type": "main",
             "index": 0
           }

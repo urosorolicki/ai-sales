@@ -168,6 +168,19 @@ services:
       ENRICH_CANDIDATE_POOL: ${ENRICH_CANDIDATE_POOL:-15}
       ENRICH_RETRY_DAYS: ${ENRICH_RETRY_DAYS:-30}
 
+      # Finding contacts through the company's own public repositories (WF-03).
+      # The website route yields nothing: of eleven companies checked, none
+      # published a personal address, so the pattern inference had nothing to
+      # observe. Commit metadata does carry it. GITHUB_TOKEN is optional and
+      # raises the API limit from 60 requests an hour to 5000.
+      ENRICH_GITHUB_ENABLED: ${ENRICH_GITHUB_ENABLED:-true}
+      ENRICH_GITHUB_MAX_ORGS: ${ENRICH_GITHUB_MAX_ORGS:-3}
+      ENRICH_GITHUB_MAX_REPOS: ${ENRICH_GITHUB_MAX_REPOS:-3}
+      ENRICH_GITHUB_COMMITS_PER_REPO: ${ENRICH_GITHUB_COMMITS_PER_REPO:-40}
+      ENRICH_GITHUB_MAX_PEOPLE: ${ENRICH_GITHUB_MAX_PEOPLE:-12}
+      ENRICH_GITHUB_INTERVAL_MS: ${ENRICH_GITHUB_INTERVAL_MS:-400}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+
       # Scoring and outreach.
       RESCORE_AFTER_DAYS: ${RESCORE_AFTER_DAYS:-7}
       RESCORE_BATCH_SIZE: ${RESCORE_BATCH_SIZE:-50}

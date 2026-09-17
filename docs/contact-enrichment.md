@@ -68,6 +68,62 @@ Role addresses are verified and recorded in `agent_runs.output.role_addresses`,
 never written to `people`. They are real and they are published; there is simply
 no person behind them.
 
+## Commit metadata, and why it had to be added
+
+`Deriving an address` below requires a real address observed on the company's
+own domain before any address may be derived. On this profile of company, the
+website never provides one. Eleven were checked by hand across the fourteen
+paths this workflow fetches, and **not one published a personal address**. Three
+published a role address. So the derivation step could never fire, and WF-03's
+measured output was seven named Miro executives, complete with titles, and zero
+addresses - its own note reading "no address pattern could be observed on this
+domain, so no address was derived".
+
+What companies of this profile do publish, once they have a public repository,
+is their engineers' work addresses in commit metadata. That is not an oversight
+or a leak: git records the author's name and address in the commit object, and
+the company's own repository is where it is published.
+
+So WF-03 reads the company's GitHub account and takes name and address pairs
+out of recent commits. Measured over ten accounts, eight yielded a dominant,
+unambiguous pattern:
+
+| Domain | Pattern | The pair that proved it |
+|---|---|---|
+| miro.com | `first` | Horea Porutiu, `horea@` |
+| monzo.com | `firstlast` | Alex Turkin, `alexturkin@` |
+| adyen.com | `first.last` | Dimitra Akourou, `dimitra.akourou@` |
+| gocardless.com | `flast` | Jamie Cobbett, `jcobbett@` |
+
+The account is found from a `github.com/...` link on the company's own pages,
+harvested from the **raw** HTML because `htmlToText` discards the href. Failing
+that it is guessed from the domain, including the domain read as one word, which
+is how `smartly.io` resolves to `smartlyio`. A published link is not a guess, so
+when there is one the guesses are not tried at all - the unauthenticated GitHub
+API allows 60 calls an hour and a wasted call is one a real company does not
+get. Nine accounts of eleven were found this way.
+
+These pairs are **not** passed through the model and are not checked against the
+fetched pages. They did not come from a model, so there is nothing to
+hallucinate: each is a name and an address that git recorded together. They join
+the people list with `discovery_method = 'published_page'` and `source_url`
+pointing at the commit, and the existing inference then does its ordinary job.
+
+Commits by machinery are excluded - bot, CI, `noreply`, Dependabot and the rest
+- as is any author whose name is a single word, because the pattern check needs
+both halves of a name to prove anything.
+
+`GITHUB_TOKEN` is optional. Without it, 60 requests an hour is enough for
+`ENRICH_BATCH_SIZE=3` on an hourly schedule and not much more; a read-only token
+with no scopes raises it to 5000.
+
+### What this does not solve
+
+The people found this way are engineers, not budget holders. They establish the
+*pattern*; the decision maker still has to come off the company's own leadership
+page, and that extraction is weak - three of eight companies, with noisy output.
+A high `decision_maker_score` still depends on the website naming somebody.
+
 ## Deriving an address
 
 The one place an address is produced rather than read. It only happens when the

@@ -273,7 +273,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
         "options": {
-          "timeout": 600000
+          "timeout": "={{ $env.ENRICHMENT_MODEL_TIMEOUT_MS || 600000 }}"
         }
       },
       "id": "c0300000-0000-4000-8000-00000000000e",

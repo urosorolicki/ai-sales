@@ -297,7 +297,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.triage_request) }}",
         "options": {
-          "timeout": 180000
+          "timeout": "={{ $env.TRIAGE_MODEL_TIMEOUT_MS || 180000 }}"
         }
       },
       "id": "n2-triage",

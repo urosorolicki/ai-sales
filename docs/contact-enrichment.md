@@ -123,6 +123,24 @@ both halves of a name to prove anything.
 `ENRICH_BATCH_SIZE=3` on an hourly schedule and not much more; a read-only token
 with no scopes raises it to 5000.
 
+### A name is not always a person
+
+The role check in `Deriving an address` looks at the local-part of an address -
+`info@`, `hello@`, `jobs@` - and it never sees a name. That was enough while no
+addresses were being derived. The moment inference started working it was not:
+Smartly.io's site lists "Agency Teams", "Brand Teams", "Creative Teams" and
+"Performance Teams", each of which is two words, appears on the page, and passed
+every check. Five addresses were derived for them, and none of them exists.
+
+So a name is now also tested for being a person at all. A name reading as a
+group (team, department, desk, staff, support and the rest) or as a company (an
+`Inc`, `GmbH`, `Ltd` suffix) is dropped, as is one whose title is simply part of
+its own name - "Smartly Team" arrived with the title "Team", which means nothing
+on the page identified anybody.
+
+This is not a model failure. The model transcribed what the page said; the page
+said "Agency Teams". The failure was a rule that only ever examined addresses.
+
 ### What this does not solve
 
 The people found this way are engineers, not budget holders. They establish the

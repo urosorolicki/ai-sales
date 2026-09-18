@@ -39,7 +39,7 @@ reads replies, so a "stop" has to be honoured by hand:
 --
 Uroš Orolicki
 Ninefold - DevOps, backend and frontend engineering
-https://ninefold.dev
+https://ninefold.com
 
 Not the right person, or not interested? Reply "stop" and you will not hear
 from us again.

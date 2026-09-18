@@ -1,0 +1,35 @@
+; foldnine.dev - mail records for Migadu.
+;
+; Import into Cloudflare: DNS > Records > Import and Export > Import.
+; Leave "Proxy imported DNS records" UNCHECKED. Proxying a DKIM CNAME makes
+; Cloudflare answer with its own address instead of the key, DKIM then fails
+; and the mail lands in spam.
+;
+; Cloudflare ignores SOA and apex NS on import, so neither is here.
+
+$ORIGIN foldnine.dev.
+$TTL 3600
+
+; --- where mail for the domain is delivered --------------------------------
+@	3600	IN	MX	10 aspmx1.migadu.com.
+@	3600	IN	MX	20 aspmx2.migadu.com.
+
+; --- who is allowed to send as this domain ---------------------------------
+; Exactly one SPF record. Two are as invalid as none.
+@	3600	IN	TXT	"v=spf1 include:spf.migadu.com -all"
+
+; --- proof the domain is yours ---------------------------------------------
+; Migadu shows this code under Domains once foldnine.dev is added. Uncomment
+; the line and paste the code in, or add this one record by hand in Cloudflare.
+;@	3600	IN	TXT	"hosted-email-verify=PASTE_CODE_HERE"
+
+; --- DKIM signing keys ------------------------------------------------------
+; The target is fully qualified and contains the domain twice on purpose.
+key1._domainkey	3600	IN	CNAME	key1.foldnine.dev._domainkey.migadu.com.
+key2._domainkey	3600	IN	CNAME	key2.foldnine.dev._domainkey.migadu.com.
+key3._domainkey	3600	IN	CNAME	key3.foldnine.dev._domainkey.migadu.com.
+
+; --- what receivers should do with mail that fails the checks ---------------
+; p=none reports without rejecting. Move to quarantine after a month of clean
+; reports, once the aggregate reports show nothing legitimate is failing.
+_dmarc	3600	IN	TXT	"v=DMARC1; p=none; rua=mailto:uros@foldnine.dev"

@@ -7,6 +7,12 @@
 ;
 ; Cloudflare ignores SOA and apex NS on import, so neither is here.
 ;
+; The apex A/AAAA records that serve the site are NOT here and must not be
+; added. They are created and owned by the Worker custom domain declared in
+; wrangler.jsonc, and Cloudflare rewrites them on deploy. Mail and the site
+; coexist at the apex because the records are proxied and flattened; an A
+; record written by hand here would be a second, stale answer.
+;
 ; The first seven records were imported on 2026-09-18 and are live. Cloudflare's
 ; import ADDS records rather than replacing them, so do not re-import this file
 ; over a zone that already has them - a second SPF record is as invalid as none.

@@ -1,0 +1,36 @@
+// Deployment of the one-page site in site/ to foldnine.dev.
+//
+// This is a Worker with nothing but static assets - no "main", no code. It is
+// the successor to Cloudflare Pages, which wrangler no longer creates: as of
+// wrangler 4.x the `pages` commands delegate here, and `pages project create`
+// fails outright. Pages is still reachable behind a --force flag; this is the
+// path that is not on its way out.
+//
+// Deploy:  npx wrangler deploy
+{
+  "name": "foldnine",
+  "compatibility_date": "2026-09-18",
+
+  // Everything in site/ is served as-is. _headers is configuration rather than
+  // content: Workers reads it for the response headers and does not serve it.
+  "assets": {
+    "directory": "./site"
+  },
+
+  // Binding the apex directly. Cloudflare creates and proxies the DNS record
+  // for it on the first deploy, and issues the certificate. The MX and TXT
+  // records already in the zone are untouched - CNAME flattening is what makes
+  // mail and a site coexist at the apex.
+  //
+  // foldnine.dev is on the HSTS preload list, so http:// never reaches here at
+  // all; browsers rewrite it to https:// before sending anything.
+  "routes": [
+    { "pattern": "foldnine.dev", "custom_domain": true }
+  ],
+
+  // One public address, on purpose. Without these the same page is also served
+  // from a workers.dev subdomain and from per-version preview URLs, which is a
+  // second and third copy of a marketing site for search engines to find.
+  "workers_dev": false,
+  "preview_urls": false
+}

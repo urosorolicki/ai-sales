@@ -1,13 +1,14 @@
 # Response headers for Cloudflare Pages. Pages reads this file at build time and
 # does not serve it. Paths are matched in order; `/*` is every response.
 #
-# The page loads nothing from anywhere - no fonts, no scripts, no analytics - so
-# the policy below can deny every fetch and then name the two exceptions the
-# page actually uses: its own inline <style>, and the favicon, which is a data:
-# URI in the markup. If a future edit adds an external asset, the browser will
-# refuse to load it until this file says otherwise. That is the point.
+# The page loads nothing from anywhere else - no CDN, no scripts, no analytics.
+# The policy below denies every fetch and then names the three the page actually
+# makes: its own inline <style>, the favicon as a data: URI in the markup, and
+# two woff2 files from this same origin. If a future edit adds an external
+# asset, the browser will refuse to load it until this file says otherwise.
+# That is the point.
 /*
-  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(), camera=(), microphone=()

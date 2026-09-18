@@ -6,184 +6,529 @@
 <title>Foldnine — infrastructure, backend and frontend engineering</title>
 <meta name="description" content="Foldnine works with European product companies on infrastructure, backend and frontend engineering. Bounded scope, written outcomes, no lock-in.">
 <meta name="color-scheme" content="light dark">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>9</text></svg>">
+<link rel="canonical" href="https://foldnine.dev/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231d5c4f'/><path d='M9 8h9l5 5v11H9z' fill='none' stroke='%23fbfaf7' stroke-width='2' stroke-linejoin='round'/><path d='M18 8v5h5' fill='none' stroke='%23fbfaf7' stroke-width='2' stroke-linejoin='round'/></svg>">
+<link rel="preload" href="fonts/newsreader.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
 <style>
-  :root {
-    --bg: #fbfaf8;
-    --fg: #1a1a18;
-    --muted: #5d5d57;
-    --rule: #e2e0da;
-    --accent: #1d5c4f;
-    --card: #ffffff;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #14141a;
-      --fg: #eceaea;
-      --muted: #9b9a98;
-      --rule: #2b2b33;
-      --accent: #6fd3ba;
-      --card: #1c1c23;
-    }
-  }
-  * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--fg);
-    font: 400 17px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
-    font-feature-settings: "kern", "liga";
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 16px; }
-  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+/* ---------------------------------------------------------------------------
+   Two typefaces, both served from this origin. Newsreader carries every word a
+   person reads as prose; JetBrains Mono carries every fact they scan for. The
+   split is the whole idea: what this business sells is a written report, so the
+   page is set like one, and the durations and deliverables sit in the column
+   where the eye goes looking for them rather than buried mid-paragraph.
+   Subset to Latin + Latin Extended-A, which is what English and Serbian need.
+--------------------------------------------------------------------------- */
+@font-face {
+  font-family: "Newsreader";
+  src: url("fonts/newsreader.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
 
-  header { padding: 4rem 0 0; }
-  .mark {
-    display: inline-flex; align-items: baseline; gap: .5rem;
-    font-weight: 620; font-size: 1.15rem; letter-spacing: -.01em;
-  }
-  .mark span[aria-hidden] {
-    display: inline-grid; place-items: center;
-    width: 1.6rem; height: 1.6rem; border-radius: .45rem;
-    background: var(--accent); color: var(--bg);
-    font-size: .95rem; font-weight: 700;
-  }
+/* ---------------------------------------------------------------------------
+   One palette in two temperatures. Both are warm - the dark theme is this paper
+   with the light turned off, not a different brand. The accent is one hue
+   (~167deg) at two lightnesses, so it stays recognisably the same green.
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: light dark;
 
-  h1 {
-    margin: 2.5rem 0 0;
-    font-size: clamp(1.75rem, 5.2vw, 2.6rem);
-    line-height: 1.18;
-    letter-spacing: -.02em;
-    font-weight: 600;
-    max-width: 22ch;
+  --bg:       #fbfaf7;
+  --surface:  #ffffff;
+  --ink:      #17160f;
+  --muted:    #58533f;
+  --rule:     #e3ded0;
+  --rule-firm:#cfc8b6;
+  --prose:    #33302a;
+  --accent:   #1a5648;
+  --accent-soft: #e8f0ec;
+
+  --measure: 34rem;
+  --rail: 7.5rem;
+  --card-pad: clamp(1.25rem, 3.5vw, 2.25rem);
+  --gutter: clamp(1rem, 5vw, 3.5rem);
+  --t: .1s;
+
+  --step--1: .75rem;
+  --step-0:  1.125rem;
+  --step-1:  clamp(1.1875rem, .9rem + .9vw, 1.4375rem);
+  --step-2:  clamp(1.375rem, 1.1rem + 1.1vw, 1.75rem);
+  --step-3:  clamp(2.25rem, 1.3rem + 4.2vw, 4.125rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:       #13120e;
+    --surface:  #1a1914;
+    --ink:      #ece8dc;
+    --muted:    #a29b87;
+    --rule:     #2b2921;
+    --rule-firm:#403d31;
+    --prose:    #d6d1c4;
+    --accent:   #7cd4bb;
+    --accent-soft: #1d2b26;
   }
-  .lede { margin: 1.1rem 0 0; color: var(--muted); font-size: 1.08rem; max-width: 56ch; }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:       #13120e;
+  --surface:  #1a1914;
+  --ink:      #ece8dc;
+  --muted:    #a29b87;
+  --rule:     #2b2921;
+  --rule-firm:#403d31;
+  --prose:    #d6d1c4;
+  --accent:   #7cd4bb;
+  --accent-soft: #1d2b26;
+}
 
-  h2 {
-    margin: 0 0 1.5rem;
-    font-size: .78rem; font-weight: 650;
-    letter-spacing: .09em; text-transform: uppercase;
-    color: var(--muted);
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Newsreader", Georgia, "Times New Roman", serif;
+  font-size: var(--step-0);
+  font-weight: 400;
+  line-height: 1.62;
+  font-optical-sizing: auto;
+  font-feature-settings: "kern", "liga", "clig";
+  hanging-punctuation: first last;
+}
+
+@media (prefers-color-scheme: light) {
+  body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) body { font-weight: 380; }
+}
+:root[data-theme="dark"] body { font-weight: 380; }
+
+::selection { background: var(--accent); color: var(--bg); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: .125em;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 18%, transparent);
+  border-radius: 2px;
+}
+
+/* Keyboard-only, and the first thing a keyboard user meets. */
+.skip {
+  position: absolute; left: var(--gutter); top: -4rem;
+  z-index: 10;
+  background: var(--accent); color: var(--bg);
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); letter-spacing: .08em; text-transform: uppercase;
+  padding: .6rem .9rem; border-radius: .25rem; text-decoration: none;
+  transition: top .12s ease;
+}
+.skip:focus { top: .75rem; color: var(--bg); }
+
+/* --- the frame ----------------------------------------------------------- */
+
+.wrap { max-width: 64rem; margin: 0 auto; padding-inline: var(--gutter); }
+
+/* The asymmetric rail the whole page hangs on. This is the Sidebar primitive:
+   the reading column refuses to drop below a real measure, and the moment it
+   would have to, the row wraps and the label sits above its section instead.
+   It reflows on the container it is actually in, so there is no breakpoint to
+   get wrong and no width at which the layout is briefly broken.
+
+   The floor is 26rem rather than a percentage: a percentage still yields a rail
+   plus a 13em column on a narrow phone, which is a rail the page has not earned.
+   min() is load-bearing - a bare 26rem floor overflows any container narrower
+   than 26rem instead of wrapping. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: clamp(1.5rem, 4vw, 3rem);
+  row-gap: 1.25rem;
+}
+.row > .label { flex-basis: var(--rail); flex-grow: 1; }
+.row > :not(.label) { flex-basis: 0; flex-grow: 999; min-inline-size: min(26rem, 100%); }
+
+.label {
+  margin: 0;
+  position: sticky;
+  top: 1.5rem;
+  align-self: start;
+  font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: var(--step--1);
+  font-weight: 500;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+  line-height: 1.5;
+  padding-top: .45rem;
+  text-wrap: balance;
+}
+footer .label { position: static; }
+
+.prose { max-width: var(--measure); text-wrap: pretty; color: var(--prose); }
+
+/* Trims the half-leading above and below, so a stack of mixed sizes aligns on
+   cap height instead of on the line box. No Firefox yet; costs a pixel there. */
+@supports (text-box: trim-both cap alphabetic) {
+  h1, h2, h3, .mailto { text-box: trim-both cap alphabetic; }
+}
+.prose p { margin: 0 0 1.1rem; }
+.prose p:last-child { margin-bottom: 0; }
+
+a {
+  color: inherit;
+  text-decoration-color: var(--rule-firm);
+  text-decoration-thickness: .05em;
+  text-underline-offset: .18em;
+  transition: text-decoration-color var(--t) ease, color var(--t) ease;
+}
+a:hover { color: var(--accent); text-decoration-color: currentColor; }
+
+/* --- masthead ------------------------------------------------------------ */
+
+.masthead {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+  padding: 1.6rem 0 0;
+}
+.wordmark {
+  display: inline-flex; align-items: center; gap: .55rem;
+  font-size: 1.3125rem; font-weight: 500; letter-spacing: -.012em;
+  text-decoration: none;
+}
+.wordmark svg { width: 1.0625rem; height: 1.0625rem; color: var(--accent); flex: none; }
+.masthead-mail {
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); letter-spacing: .04em;
+  color: var(--muted); text-decoration: none;
+}
+.masthead-mail:hover { color: var(--accent); }
+
+/* --- hero ---------------------------------------------------------------- */
+
+.hero { padding: clamp(3.5rem, 11vh, 7rem) 0 clamp(3rem, 8vh, 5rem); }
+h1 {
+  margin: 0;
+  font-size: var(--step-3);
+  font-weight: 400;
+  line-height: 1.04;
+  letter-spacing: -.028em;
+  max-width: 17ch;
+  text-wrap: balance;
+}
+.lede {
+  margin: clamp(1.4rem, 3vw, 2rem) 0 0;
+  font-size: var(--step-1);
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 40rem;
+  text-wrap: pretty;
+}
+
+/* --- sections ------------------------------------------------------------ */
+
+section { padding: clamp(3rem, 7vw, 5rem) 0; border-top: 1px solid var(--rule); }
+
+/* --- the offers ---------------------------------------------------------- */
+
+/* The audit is the front door - it is the smallest thing a stranger can say
+   yes to - so it gets a surface and a size the other three do not. Four equal
+   boxes would have flattened a hierarchy that is real. */
+.lead-offer {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: .25rem;
+  padding: var(--card-pad);
+  margin-bottom: 2.5rem;
+}
+.offer-no {
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); font-weight: 500; letter-spacing: .1em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.lead-offer h3 {
+  margin: .5rem 0 0;
+  font-size: var(--step-2); font-weight: 500; letter-spacing: -.018em; line-height: 1.2;
+}
+.lead-offer p { margin: .85rem 0 0; color: var(--muted); max-width: 36rem; text-wrap: pretty; }
+
+/* The facts, pulled out of the prose and set in the typeface the eye scans. */
+.spec {
+  display: flex; flex-wrap: wrap; gap: .4rem .5rem;
+  margin: 1.35rem 0 0; padding: 0; list-style: none;
+}
+.spec li {
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); letter-spacing: .04em;
+  color: var(--ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: .3rem .7rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.offer-stack { container-type: inline-size; }
+.offers { margin: 0; padding: 0; list-style: none; }
+@container (min-width: 30rem) {
+  .offers { padding-left: calc(var(--card-pad) + 3px); }
+}
+.offer { border-top: 1px solid var(--rule); padding: 1.6rem 0; }
+.offer:first-child { border-top: 0; padding-top: 0; }
+.offer-head { display: flex; align-items: baseline; gap: .85rem; flex-wrap: wrap; }
+.offer h3 { margin: 0; font-size: var(--step-1); font-weight: 500; letter-spacing: -.012em; }
+.offer p { margin: .5rem 0 0; color: var(--muted); max-width: 36rem; text-wrap: pretty; }
+.offer .spec { margin-top: .9rem; }
+
+/* --- how we work --------------------------------------------------------- */
+
+.principles { margin: 0; padding: 0; list-style: none; counter-reset: p; }
+.principles li {
+  counter-increment: p;
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  padding: 1.25rem 0;
+  border-top: 1px solid var(--rule);
+  max-width: 40rem;
+}
+.principles li:first-child { border-top: 0; padding-top: 0; }
+.principles li::before {
+  content: counter(p, decimal-leading-zero);
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); letter-spacing: .08em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: .38rem;
+}
+.principles strong { font-weight: 600; }
+.principles span { color: var(--muted); }
+
+/* --- fit ----------------------------------------------------------------- */
+
+.fit { margin: 0 0 1.75rem; padding: 0; max-width: 40rem; }
+.fit div {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0 1rem;
+  padding: .7rem 0;
+  border-top: 1px solid var(--rule);
+}
+.fit div:first-child { border-top: 0; padding-top: 0; }
+.fit dt {
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); padding-top: .3rem;
+}
+.fit dd { margin: 0; }
+
+/* --- contact ------------------------------------------------------------- */
+
+.mailto {
+  display: inline-block;
+  margin: 0 0 1rem;
+  font-size: var(--step-2);
+  font-weight: 500;
+  letter-spacing: -.015em;
+  text-decoration: none;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: .1rem;
+}
+.mailto:hover { color: var(--accent); }
+
+/* --- footer -------------------------------------------------------------- */
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding: 2rem 0 3.5rem;
+  color: var(--muted);
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: var(--step--1);
+  letter-spacing: .04em;
+  line-height: 1.9;
+}
+footer p { margin: 0; }
+
+/* --- motion -------------------------------------------------------------- */
+
+/* There is no scroll-driven reveal here, and that is a decision rather than an
+   omission. A view() timeline is inactive when nothing can scroll - a tall
+   monitor, a zoomed-out window, a print or screenshot pass - and an animation
+   filling from opacity 0 then leaves the sections below the first screen
+   permanently blank. Measured, not assumed: at a 1280x6052 viewport three of
+   the four sections rendered at opacity 0.
+
+   So the motion on this page is only ever attached to something a person just
+   did. Two durations, and that is the whole system: --t for a state change.
+   Nothing animates on arrival, so nothing can fail to arrive. */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
   }
-  section { padding: 3.5rem 0; border-top: 1px solid var(--rule); margin-top: 3.5rem; }
-  section:first-of-type { margin-top: 3rem; }
+}
 
-  .services { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: .75rem; overflow: hidden; }
-  .service { background: var(--card); padding: 1.4rem 1.3rem; }
-  .service h3 { margin: 0 0 .4rem; font-size: 1.02rem; font-weight: 620; letter-spacing: -.005em; }
-  .service p { margin: 0; color: var(--muted); font-size: .97rem; }
-
-  ul.plain { margin: 0; padding: 0; list-style: none; display: grid; gap: 1.1rem; }
-  ul.plain li { padding-left: 1.4rem; position: relative; color: var(--muted); }
-  ul.plain li::before {
-    content: ""; position: absolute; left: 0; top: .62em;
-    width: .45rem; height: .45rem; border-radius: 50%; background: var(--accent);
-  }
-  ul.plain strong { color: var(--fg); font-weight: 600; }
-
-  .contact p { margin: 0 0 .6rem; }
-  .mailto { font-size: 1.22rem; font-weight: 600; letter-spacing: -.01em; }
-
-  footer {
-    border-top: 1px solid var(--rule);
-    margin-top: 3.5rem; padding: 2rem 0 4rem;
-    color: var(--muted); font-size: .86rem;
-  }
-  footer p { margin: 0 0 .35rem; }
-
-  @media (min-width: 40rem) {
-    .services { grid-template-columns: 1fr 1fr; }
-  }
+@media print {
+  :root { --bg: #fff; --surface: #fff; --ink: #000; --prose: #1a1a1a; --muted: #333; --rule: #bbb; --accent: #000; }
+  .masthead-mail { display: none; }
+  section { break-inside: avoid; }
+}
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <div class="wrap">
 
-  <header>
-    <div class="mark"><span aria-hidden="true">9</span> Foldnine</div>
-    <h1>Infrastructure that stops being the reason releases are slow.</h1>
-    <p class="lede">
-      Foldnine works with European product companies on the parts of the system
-      nobody owns yet — the pipeline, the cluster, the service that pages
-      somebody at night — and on the backend and frontend work around them.
-    </p>
+  <header class="masthead">
+    <a class="wordmark" href="/">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round">
+        <path d="M4.5 3.5h10l5 5v12h-15z"/><path d="M14.5 3.5v5h5"/>
+      </svg>
+      Foldnine
+    </a>
+    <a class="masthead-mail" href="mailto:uros@foldnine.dev">uros@foldnine.dev</a>
   </header>
 
-  <section>
-    <h2>What we do</h2>
-    <div class="services">
-      <div class="service">
-        <h3>Infrastructure audit</h3>
-        <p>
-          There is evidence of a problem and no clear cause. Two weeks, ending in
-          a written report that names where the time goes and what to do first —
-          useful whether or not you hire us for the rest.
-        </p>
-      </div>
-      <div class="service">
-        <h3>Improvement sprint</h3>
-        <p>
-          One bounded problem you can already describe: a forty-minute build, a
-          release that needs a manual step, a migration that stalled. Fixed
-          scope, fixed end date.
-        </p>
-      </div>
-      <div class="service">
-        <h3>Fractional DevOps and SRE</h3>
-        <p>
-          An ongoing need without a full-time hire to cover it. A set number of
-          days a month, owning the platform work rather than advising on it.
-        </p>
-      </div>
-      <div class="service">
-        <h3>Backend and frontend</h3>
-        <p>
-          The service, the API or the interface that the infrastructure work
-          keeps running into. Built to the same standard as the platform under
-          it, in your repository and your stack.
-        </p>
-      </div>
+  <main id="main" tabindex="-1">
+
+    <div class="hero">
+      <h1>Infrastructure that stops being the reason releases are slow.</h1>
+      <p class="lede">
+        Foldnine works with European product companies on the parts of the
+        system nobody owns yet — the pipeline, the cluster, the service that
+        pages somebody at night — and on the backend and frontend work around
+        them.
+      </p>
     </div>
-  </section>
 
-  <section>
-    <h2>How we work</h2>
-    <ul class="plain">
-      <li><strong>Bounded before open-ended.</strong> The first piece of work has an end date and a deliverable. Retainers come after evidence, not instead of it.</li>
-      <li><strong>Written outcomes.</strong> What was found, what was changed and what is still wrong, in a document your team can act on without us in the room.</li>
-      <li><strong>Your repository, your infrastructure, your accounts.</strong> Nothing runs on our side and nothing needs us to keep running.</li>
-      <li><strong>We say no to work that will not help.</strong> If the problem is a hiring problem or a product decision, the audit will say so.</li>
-    </ul>
-  </section>
+    <section class="row">
+      <h2 class="label">What we do</h2>
+      <div class="offer-stack">
 
-  <section>
-    <h2>Who this is for</h2>
-    <p class="lede" style="margin:0">
-      Product companies in Europe running their own infrastructure, roughly
-      twenty to five hundred people, at the point where the platform work is
-      real but a dedicated platform team is not yet. Usually Kubernetes,
-      Terraform and a cloud bill that has started getting attention.
-    </p>
-  </section>
+        <article class="lead-offer">
+          <p class="offer-no">01 — Start here</p>
+          <h3>Infrastructure audit</h3>
+          <p>
+            There is evidence of a problem and no clear cause. Two weeks, ending
+            in a written report that names where the time goes and what to do
+            first — useful whether or not you hire us for the rest.
+          </p>
+          <ul class="spec">
+            <li>Two weeks</li>
+            <li>Written report</li>
+            <li>Stands on its own</li>
+          </ul>
+        </article>
 
-  <section class="contact">
-    <h2>Contact</h2>
-    <p class="mailto"><a href="mailto:uros@foldnine.dev">uros@foldnine.dev</a></p>
-    <p style="color:var(--muted); margin-top:.8rem">
-      Write in English or Serbian. A short description of what is slow or
-      breaking is enough to start; you will get a straight answer about whether
-      this is worth a call.
-    </p>
-  </section>
+        <ol class="offers">
+          <li class="offer">
+            <div class="offer-head">
+              <span class="offer-no">02</span>
+              <h3>Improvement sprint</h3>
+            </div>
+            <p>
+              One bounded problem you can already describe: a forty-minute
+              build, a release that needs a manual step, a migration that
+              stalled.
+            </p>
+            <ul class="spec"><li>Fixed scope</li><li>Fixed end date</li></ul>
+          </li>
+          <li class="offer">
+            <div class="offer-head">
+              <span class="offer-no">03</span>
+              <h3>Fractional DevOps and SRE</h3>
+            </div>
+            <p>
+              An ongoing need without a full-time hire to cover it. Owning the
+              platform work rather than advising on it.
+            </p>
+            <ul class="spec"><li>Set days per month</li><li>Continuing</li></ul>
+          </li>
+          <li class="offer">
+            <div class="offer-head">
+              <span class="offer-no">04</span>
+              <h3>Backend and frontend</h3>
+            </div>
+            <p>
+              The service, the API or the interface that the infrastructure work
+              keeps running into. Built to the same standard as the platform
+              under it.
+            </p>
+            <ul class="spec"><li>Your repository</li><li>Your stack</li></ul>
+          </li>
+        </ol>
 
-  <footer>
-    <p>Foldnine — Uroš Orolicki</p>
-    <!-- LEGAL: replace with the registered business name, address and tax number.
-         A commercial site selling into the EU has to identify who is behind it,
-         and it is also what makes the business look like one. -->
-    <p>Serbia · <a href="mailto:uros@foldnine.dev">uros@foldnine.dev</a></p>
+      </div>
+    </section>
+
+    <section class="row">
+      <h2 class="label">How we work</h2>
+      <ol class="principles">
+        <li><div><strong>Bounded before open-ended.</strong> <span>The first piece of work has an end date and a deliverable. Retainers come after evidence, not instead of it.</span></div></li>
+        <li><div><strong>Written outcomes.</strong> <span>What was found, what was changed and what is still wrong, in a document your team can act on without us in the room.</span></div></li>
+        <li><div><strong>Your repository, your infrastructure, your accounts.</strong> <span>Nothing runs on our side and nothing needs us to keep running.</span></div></li>
+        <li><div><strong>We say no to work that will not help.</strong> <span>If the problem is a hiring problem or a product decision, the audit will say so.</span></div></li>
+      </ol>
+    </section>
+
+    <section class="row">
+      <h2 class="label">Who this is for</h2>
+      <div>
+        <dl class="fit">
+          <div><dt>Where</dt><dd>Europe</dd></div>
+          <div><dt>Size</dt><dd>Roughly twenty to five hundred people</dd></div>
+          <div><dt>Stack</dt><dd>Usually Kubernetes and Terraform, on your own cloud account</dd></div>
+          <div><dt>Stage</dt><dd>The platform work is real; a platform team is not yet</dd></div>
+        </dl>
+        <div class="prose">
+          <p>
+            The cloud bill has started getting attention, and the people who
+            would fix it are the same people shipping the product.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="row">
+      <h2 class="label">Contact</h2>
+      <div>
+        <a class="mailto" href="mailto:uros@foldnine.dev">uros@foldnine.dev</a>
+        <div class="prose">
+          <p>
+            Write in English or Serbian. A short description of what is slow or
+            breaking is enough to start; you will get a straight answer about
+            whether this is worth a call.
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="row">
+    <p class="label">Foldnine</p>
+    <div>
+      <p>Uroš Orolicki · Serbia</p>
+      <!-- LEGAL: replace with the registered business name, address and tax number.
+           A commercial site selling into the EU has to identify who is behind it,
+           and it is also what makes the business look like one. -->
+      <p><a href="mailto:uros@foldnine.dev">uros@foldnine.dev</a></p>
+    </div>
   </footer>
 
 </div>

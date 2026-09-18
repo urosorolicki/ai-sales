@@ -38,8 +38,8 @@ reads replies, so a "stop" has to be honoured by hand:
 ```
 --
 Uroš Orolicki
-Ninefold - DevOps, backend and frontend engineering
-https://ninefold.com
+Foldnine - DevOps, backend and frontend engineering
+https://foldnine.dev
 
 Not the right person, or not interested? Reply "stop" and you will not hear
 from us again.

@@ -6,6 +6,11 @@
 ; and the mail lands in spam.
 ;
 ; Cloudflare ignores SOA and apex NS on import, so neither is here.
+;
+; The first seven records were imported on 2026-09-18 and are live. Cloudflare's
+; import ADDS records rather than replacing them, so do not re-import this file
+; over a zone that already has them - a second SPF record is as invalid as none.
+; This file is the intended state of the zone, for a rebuild or a move.
 
 $ORIGIN foldnine.dev.
 $TTL 3600
@@ -19,9 +24,9 @@ $TTL 3600
 @	3600	IN	TXT	"v=spf1 include:spf.migadu.com -all"
 
 ; --- proof the domain is yours ---------------------------------------------
-; Migadu shows this code under Domains once foldnine.dev is added. Uncomment
-; the line and paste the code in, or add this one record by hand in Cloudflare.
-;@	3600	IN	TXT	"hosted-email-verify=PASTE_CODE_HERE"
+; Issued per domain by Migadu, under Domains once foldnine.dev is added. It is
+; published in DNS for anyone to read, so it is not a secret.
+@	3600	IN	TXT	"hosted-email-verify=d7sk0efg"
 
 ; --- DKIM signing keys ------------------------------------------------------
 ; The target is fully qualified and contains the domain twice on purpose.

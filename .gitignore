@@ -60,3 +60,6 @@ temp/
 Thumbs.db
 .idea/
 .vscode/
+
+# Wrangler local state
+.wrangler/

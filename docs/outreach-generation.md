@@ -69,6 +69,20 @@ verified, which defeats the field, so it is blocked.
 Nothing is edited to comply. A blocked draft is one a human can read and learn
 from; a quietly corrected one teaches nobody anything.
 
+### A schema value in the prose
+
+The agent picks `recommended_service` from an enum, and one draft came back
+reading "I run a bounded devops_improvement_sprint": the identifier itself,
+inside the sentence, in a message addressed to a person. It passed every check
+there was, because none of them looked for it.
+
+Any snake_case token in the subject or body now blocks the draft. Nobody writes
+an underscore in an email, so such a token is the model quoting its own schema
+back at the reader. `docs/company-research.md` records the same failure in the
+research agent, where `why_now` came back as
+`active_hiring_for_infrastructure_fixes` instead of a sentence, so this is a
+habit of the local models rather than a one-off.
+
 ## Three outcomes
 
 | Outcome | `outreach` | `leads` | Run |

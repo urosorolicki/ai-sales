@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foldnine — infrastructure, backend and frontend engineering</title>
+<meta name="description" content="Foldnine works with European product companies on infrastructure, backend and frontend engineering. Bounded scope, written outcomes, no lock-in.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>9</text></svg>">
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --fg: #1a1a18;
+    --muted: #5d5d57;
+    --rule: #e2e0da;
+    --accent: #1d5c4f;
+    --card: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14141a;
+      --fg: #eceaea;
+      --muted: #9b9a98;
+      --rule: #2b2b33;
+      --accent: #6fd3ba;
+      --card: #1c1c23;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 17px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+    font-feature-settings: "kern", "liga";
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 16px; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  header { padding: 4rem 0 0; }
+  .mark {
+    display: inline-flex; align-items: baseline; gap: .5rem;
+    font-weight: 620; font-size: 1.15rem; letter-spacing: -.01em;
+  }
+  .mark span[aria-hidden] {
+    display: inline-grid; place-items: center;
+    width: 1.6rem; height: 1.6rem; border-radius: .45rem;
+    background: var(--accent); color: var(--bg);
+    font-size: .95rem; font-weight: 700;
+  }
+
+  h1 {
+    margin: 2.5rem 0 0;
+    font-size: clamp(1.75rem, 5.2vw, 2.6rem);
+    line-height: 1.18;
+    letter-spacing: -.02em;
+    font-weight: 600;
+    max-width: 22ch;
+  }
+  .lede { margin: 1.1rem 0 0; color: var(--muted); font-size: 1.08rem; max-width: 56ch; }
+
+  h2 {
+    margin: 0 0 1.5rem;
+    font-size: .78rem; font-weight: 650;
+    letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  section { padding: 3.5rem 0; border-top: 1px solid var(--rule); margin-top: 3.5rem; }
+  section:first-of-type { margin-top: 3rem; }
+
+  .services { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: .75rem; overflow: hidden; }
+  .service { background: var(--card); padding: 1.4rem 1.3rem; }
+  .service h3 { margin: 0 0 .4rem; font-size: 1.02rem; font-weight: 620; letter-spacing: -.005em; }
+  .service p { margin: 0; color: var(--muted); font-size: .97rem; }
+
+  ul.plain { margin: 0; padding: 0; list-style: none; display: grid; gap: 1.1rem; }
+  ul.plain li { padding-left: 1.4rem; position: relative; color: var(--muted); }
+  ul.plain li::before {
+    content: ""; position: absolute; left: 0; top: .62em;
+    width: .45rem; height: .45rem; border-radius: 50%; background: var(--accent);
+  }
+  ul.plain strong { color: var(--fg); font-weight: 600; }
+
+  .contact p { margin: 0 0 .6rem; }
+  .mailto { font-size: 1.22rem; font-weight: 600; letter-spacing: -.01em; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    margin-top: 3.5rem; padding: 2rem 0 4rem;
+    color: var(--muted); font-size: .86rem;
+  }
+  footer p { margin: 0 0 .35rem; }
+
+  @media (min-width: 40rem) {
+    .services { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="mark"><span aria-hidden="true">9</span> Foldnine</div>
+    <h1>Infrastructure that stops being the reason releases are slow.</h1>
+    <p class="lede">
+      Foldnine works with European product companies on the parts of the system
+      nobody owns yet — the pipeline, the cluster, the service that pages
+      somebody at night — and on the backend and frontend work around them.
+    </p>
+  </header>
+
+  <section>
+    <h2>What we do</h2>
+    <div class="services">
+      <div class="service">
+        <h3>Infrastructure audit</h3>
+        <p>
+          There is evidence of a problem and no clear cause. Two weeks, ending in
+          a written report that names where the time goes and what to do first —
+          useful whether or not you hire us for the rest.
+        </p>
+      </div>
+      <div class="service">
+        <h3>Improvement sprint</h3>
+        <p>
+          One bounded problem you can already describe: a forty-minute build, a
+          release that needs a manual step, a migration that stalled. Fixed
+          scope, fixed end date.
+        </p>
+      </div>
+      <div class="service">
+        <h3>Fractional DevOps and SRE</h3>
+        <p>
+          An ongoing need without a full-time hire to cover it. A set number of
+          days a month, owning the platform work rather than advising on it.
+        </p>
+      </div>
+      <div class="service">
+        <h3>Backend and frontend</h3>
+        <p>
+          The service, the API or the interface that the infrastructure work
+          keeps running into. Built to the same standard as the platform under
+          it, in your repository and your stack.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How we work</h2>
+    <ul class="plain">
+      <li><strong>Bounded before open-ended.</strong> The first piece of work has an end date and a deliverable. Retainers come after evidence, not instead of it.</li>
+      <li><strong>Written outcomes.</strong> What was found, what was changed and what is still wrong, in a document your team can act on without us in the room.</li>
+      <li><strong>Your repository, your infrastructure, your accounts.</strong> Nothing runs on our side and nothing needs us to keep running.</li>
+      <li><strong>We say no to work that will not help.</strong> If the problem is a hiring problem or a product decision, the audit will say so.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Who this is for</h2>
+    <p class="lede" style="margin:0">
+      Product companies in Europe running their own infrastructure, roughly
+      twenty to five hundred people, at the point where the platform work is
+      real but a dedicated platform team is not yet. Usually Kubernetes,
+      Terraform and a cloud bill that has started getting attention.
+    </p>
+  </section>
+
+  <section class="contact">
+    <h2>Contact</h2>
+    <p class="mailto"><a href="mailto:uros@foldnine.dev">uros@foldnine.dev</a></p>
+    <p style="color:var(--muted); margin-top:.8rem">
+      Write in English or Serbian. A short description of what is slow or
+      breaking is enough to start; you will get a straight answer about whether
+      this is worth a call.
+    </p>
+  </section>
+
+  <footer>
+    <p>Foldnine — Uroš Orolicki</p>
+    <!-- LEGAL: replace with the registered business name, address and tax number.
+         A commercial site selling into the EU has to identify who is behind it,
+         and it is also what makes the business look like one. -->
+    <p>Serbia · <a href="mailto:uros@foldnine.dev">uros@foldnine.dev</a></p>
+  </footer>
+
+</div>
+</body>
+</html>

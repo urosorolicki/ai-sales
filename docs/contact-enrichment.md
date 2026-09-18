@@ -123,6 +123,26 @@ both halves of a name to prove anything.
 `ENRICH_BATCH_SIZE=3` on an hourly schedule and not much more; a read-only token
 with no scopes raises it to 5000.
 
+### A surname is not always the last word
+
+Adyen's pattern is `first.last`, proven on three observed addresses. Applied to
+"Pieter van der Does", their chief executive, it produced
+`pieter.does@adyen.com`. His surname is "van der Does", so that address is
+probably nobody's.
+
+The surname now starts at the first particle - van, von, de, der, den, del, di,
+da, du, la, le, bin, ter, ten, mac, mc and the rest - and runs to the end. But
+knowing the surname is not enough: `pieter.vanderdoes@` and `pieter.does@` are
+both plausible and nothing in the name says which a company writes. So a
+particle surname is derived **only** when one of the observed addresses on that
+domain already demonstrates a particle, which proves the form rather than
+assuming it. Otherwise no address is derived and the reason is recorded.
+
+This matters more here than it would elsewhere. The target is European
+companies, the names that break this are Dutch, German, Spanish, Portuguese and
+Arabic, and the people it breaks on are disproportionately senior - a founder
+is more likely to be named on a leadership page than an engineer is.
+
 ### A name is not always a person
 
 The role check in `Deriving an address` looks at the local-part of an address -

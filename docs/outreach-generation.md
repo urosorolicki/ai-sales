@@ -8,7 +8,7 @@ Prompt: `prompts/outreach.md` · Schema: `agents/outreach/schema.json`
 
 ```
 Every Hour
-  -> Read Outreach Prompt / Read Outreach Schema
+  -> Read Outreach Prompt / Read Outreach Schema / Read Signature
   -> Claim Leads                       (score >= OUTREACH_MIN_SCORE, reachable, not suppressed, no step-1 draft)
   -> Build Outreach Request -> Outreach Agent
   -> Validate And Check -> Usable Response?
@@ -37,6 +37,47 @@ that chain would break the lineage. The audit trail must not depend on a
 notification succeeding.
 
 `docs/notifications.md` has the delivery half.
+
+## The greeting and the signature are not the model's
+
+`prompts/outreach.md` asks for a body and nothing else, and until now that is
+literally what was stored: no greeting, no sender, no way for a recipient to
+say stop. A message like that identifies nobody, which is both the opposite of
+looking like a business and the thing European commercial email is required to
+do - `docs/security.md` rests the legitimate-interest basis on the sender being
+identifiable.
+
+Both now come from `prompts/signature.md`, read from disk on every run exactly
+as the prompt and the schema are, and are applied in `Validate And Check`:
+
+```
+Hi {first_name},        <- greeting, the one placeholder, from people.full_name
+
+<the model's body>
+
+--                      <- signature, verbatim from the file
+```
+
+Three decisions worth keeping:
+
+**The model does not write them.** A greeting is a fact about the recipient the
+system already has, and a signature is a claim about the sender. A model given
+a field nothing checks invents one - `A schema value in the prose` below is the
+same failure in a different field.
+
+**They are applied before the draft is stored, not at send time.** The approval
+message says an approval on a summary is not an approval; approving a body and
+sending a body plus a signature nobody read would be the same defect.
+
+**The checks still run on the model's body alone.** The signature is forty words
+and carries its own question mark, so counting it would spend a third of the
+120-word ceiling on boilerplate and trip the one-question rule on every draft.
+Measured on a real draft: 33 words as written, 52 with the envelope.
+
+The opt-out line is an obligation rather than a formality. WF-08 does not exist,
+so nothing reads replies, and a "stop" has to be honoured by hand with a row in
+`suppression_list` - after which the trigger on `outreach` refuses that address
+for good.
 
 ## The checks are mechanical
 

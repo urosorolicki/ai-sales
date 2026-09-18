@@ -108,10 +108,10 @@ queued draft also queues the approval message from `docs/telegram.md`.
 | | |
 |---|---|
 | Trigger | Schedule, hourly |
-| Input | Leads with `status = 'new'` and `score >= OUTREACH_MIN_SCORE` |
+| Input | Leads with `status = 'new'`, `score >= OUTREACH_MIN_SCORE` and a recipient who still has a usable address |
 | Steps | Outreach agent, then the mechanical checks: word count, banned phrases, `hook_source` present in the research sources, suppression |
 | Output | `outreach` row moving `draft` to `pending_approval`; lead to `pending_approval` |
-| Guards | `send: false` from the agent is respected and recorded. One draft per lead per `sequence_step`, enforced by a unique index. |
+| Guards | `send: false` from the agent is respected and recorded. One draft per lead per `sequence_step`, enforced by a unique index. A lead whose address was withdrawn or bounced after WF-04 created it is not claimed. |
 | Failure | A failed check leaves the draft at `draft` with the reason, so it can be inspected. It is never auto-corrected. |
 
 ## WF-06 Outreach Dispatcher

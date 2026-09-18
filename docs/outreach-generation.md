@@ -9,7 +9,7 @@ Prompt: `prompts/outreach.md` · Schema: `agents/outreach/schema.json`
 ```
 Every Hour
   -> Read Outreach Prompt / Read Outreach Schema
-  -> Claim Leads                       (score >= OUTREACH_MIN_SCORE, not suppressed, no step-1 draft)
+  -> Claim Leads                       (score >= OUTREACH_MIN_SCORE, reachable, not suppressed, no step-1 draft)
   -> Build Outreach Request -> Outreach Agent
   -> Validate And Check -> Usable Response?
        +-- no  -> Close Run Error
@@ -99,6 +99,26 @@ the queue instead of being regenerated every hour.
 A blocked draft leaves the lead at `new`, but the unique index on
 `(lead_id, sequence_step)` means the next pass updates that draft rather than
 adding another.
+
+## The recipient has to have an address
+
+The claim query requires one: `p.email IS NOT NULL` and an `email_status` of
+`valid`, `catch_all` or `guessed` - the same three the schema's
+`people_contactable_idx` already calls contactable.
+
+WF-04 checks this before it creates a lead, which looked like enough. It is not,
+because the address can go away afterwards and the lead stays. Measured on
+Adyen: WF-03 derived `pieter.does@adyen.com` for the chief executive at 06:00,
+WF-04 created the lead on it at 06:15 and scored the decision maker 7 for an
+address it called `guessed`, the address was withdrawn at 07:26 because his
+surname is "van der Does" and no observed address on that domain proved the
+form, and at 08:00 WF-05 wrote a draft for a lead with no recipient and queued
+it for approval. A bounce clearing an address would do the same thing.
+
+Nothing caught it downstream. `is_suppressed(NULL)` is false, so the claim's
+suppression check passed; `outreach` stores no recipient column, so the trigger
+had nothing to compare; and the approval message reads the row back out of
+`v_approval_queue`, which shows the empty address rather than refusing.
 
 ## Suppression is enforced twice
 
